@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window: core only; the launcher's own commands are the only other calls",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>Bluegrass Launcher</title>
+  <script type="module" src="main.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Bluegrass</h1>
+    <span id="version" class="muted"></span>
+    <button id="update" hidden></button>
+  </header>
+  <main>
+    <section class="left">
+      <button id="launch" class="primary">Launch Project Zomboid</button>
+      <p class="muted small">Starts the game with ZombieBuddy and PZO for this launch only. Starting from Steam stays as it was.</p>
+      <div id="warnings"></div>
+      <label for="jvm">JVM settings</label>
+      <textarea id="jvm" rows="3" spellcheck="false"></textarea>
+      <div class="row">
+        <button id="saveJvm">Save</button>
+        <button id="resetJvm">Default</button>
+      </div>
+      <label for="game">Game folder</label>
+      <div class="row">
+        <input id="game" type="text" spellcheck="false" />
+        <button id="saveGame">Set</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+    <section class="right" id="components"></section>
+  </main>
+</body>
+</html>
