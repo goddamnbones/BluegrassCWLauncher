@@ -17,12 +17,36 @@ function log(msg, bad) {
 
 let defaults = "";
 
+// RAM dropdown -> heap GB. Same table as launch.rs heap_for_ram; keep them matching.
+const RAM_HEAP = { 8: 4, 12: 6, 16: 8, 32: 10, 64: 12 };
+
+function heapOf(args) {
+  const m = /(?:^|\s)-Xmx(\d+)g(?:\s|$)/i.exec(args);
+  return m ? Number(m[1]) : null;
+}
+
+// the option whose heap matches the saved -Xmx, else "custom"
+function ramChoice(args) {
+  const h = heapOf(args);
+  const hit = Object.keys(RAM_HEAP).find((k) => RAM_HEAP[k] === h);
+  return hit || "custom";
+}
+
+function withHeap(args, gb) {
+  const rest = args.split(/\s+/).filter((a) => a && !/^-Xm[sx]/i.test(a));
+  return ["-Xms" + gb + "g", "-Xmx" + gb + "g", ...rest].join(" ");
+}
+
 async function refresh() {
   const s = await invoke("get_status");
   defaults = s.default_jvm_args;
   $("version").textContent = "launcher " + s.launcher;
   if (document.activeElement !== $("jvm")) $("jvm").value = s.jvm_args;
   if (document.activeElement !== $("game")) $("game").value = s.game_dir || "";
+  if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.jvm_args);
+  $("ramNote").textContent = "This PC has " + s.ram_gb + " GB (Windows reports a little under the real size).";
+  $("jfr").checked = s.jfr;
+  $("jfrNote").textContent = "Saved to " + s.jfr_dir + " when you quit through the game menu (last 20 minutes). Applies from the next launch.";
   $("launch").disabled = s.running || !s.game_dir;
   $("launch").textContent = s.running ? "Project Zomboid is running" : "Launch Project Zomboid";
   const w = $("warnings");
@@ -57,6 +81,14 @@ async function run(btn, fn) {
 
 $("launch").addEventListener("click", () => run($("launch"), () => invoke("launch_game")));
 $("saveJvm").addEventListener("click", () => run($("saveJvm"), () => invoke("set_jvm_args", { args: $("jvm").value })));
+$("ram").addEventListener("change", () => {
+  const gb = RAM_HEAP[$("ram").value];
+  if (!gb) return;
+  const args = withHeap($("jvm").value || defaults, gb);
+  $("jvm").value = args;
+  run($("ram"), () => invoke("set_jvm_args", { args }));
+});
+$("jfr").addEventListener("change", () => run($("jfr"), () => invoke("set_jfr", { on: $("jfr").checked })));
 $("resetJvm").addEventListener("click", () => { $("jvm").value = defaults; });
 $("saveGame").addEventListener("click", () => run($("saveGame"), () => invoke("set_game_dir", { dir: $("game").value })));
 
@@ -64,10 +96,15 @@ $("update").addEventListener("click", () => run($("update"), () => invoke("apply
 
 async function checkUpdate() {
   try {
-    const v = await invoke("check_update");
-    if (v) {
+    const u = await invoke("check_update");
+    if (u) {
+      const [v, notes] = u;
       $("update").textContent = "Update to " + v;
       $("update").hidden = false;
+      if (notes) {
+        $("updateNotes").textContent = "New in " + v + ": " + notes;
+        $("updateNotes").hidden = false;
+      }
     }
   } catch (e) {
     log(String(e), true);

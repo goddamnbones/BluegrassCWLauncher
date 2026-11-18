@@ -13,23 +13,57 @@
     <span id="version" class="muted"></span>
     <button id="update" hidden></button>
   </header>
+  <p id="updateNotes" hidden></p>
   <main>
     <section class="left">
       <button id="launch" class="primary">Launch Project Zomboid</button>
       <p class="muted small">Starts the game with ZombieBuddy and PZO for this launch only. Starting from Steam stays as it was.</p>
       <div id="warnings"></div>
+      <label for="ram">System RAM (sets the game's memory)</label>
+      <div class="row">
+        <select id="ram">
+          <option value="8">8 GB RAM: game gets 4 GB</option>
+          <option value="12">12 GB RAM: game gets 6 GB</option>
+          <option value="16">16 GB RAM: game gets 8 GB</option>
+          <option value="32">32 GB RAM: game gets 10 GB</option>
+          <option value="64">64 GB+ RAM: game gets 12 GB</option>
+          <option value="custom" disabled>Custom (set in JVM settings below)</option>
+        </select>
+      </div>
+      <p class="muted small" id="ramNote"></p>
       <label for="jvm">JVM settings</label>
       <textarea id="jvm" rows="3" spellcheck="false"></textarea>
       <div class="row">
         <button id="saveJvm">Save</button>
         <button id="resetJvm">Default</button>
       </div>
+      <label class="check"><input id="jfr" type="checkbox" /> Record a Java profile (JFR) when staff ask for one</label>
+      <p class="muted small" id="jfrNote"></p>
       <label for="game">Game folder</label>
       <div class="row">
         <input id="game" type="text" spellcheck="false" />
         <button id="saveGame">Set</button>
       </div>
       <pre id="log"></pre>
+      <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
+      <details id="changes">
+        <summary>What's new</summary>
+        <h3>0.1.2</h3>
+        <ul>
+          <li>System RAM dropdown: sets how much memory the game gets. 8 GB PCs now get 4 GB by default (was 6), 64 GB+ PCs get 12 GB.</li>
+          <li>Optional Java profile (JFR) checkbox for when staff ask for one; recordings go to C:\BGjfr.</li>
+          <li>New look, matching the Bluegrass admin menu.</li>
+          <li>Updates now show what changed before you install them.</li>
+        </ul>
+        <h3>0.1.1</h3>
+        <ul>
+          <li>Fixed console windows flashing and the launcher freezing while it checked whether the game was running.</li>
+        </ul>
+        <h3>0.1.0</h3>
+        <ul>
+          <li>First release: installs the approved ZombieBuddy and PZO, launches the game with them, leaves Steam launches as they were.</li>
+        </ul>
+      </details>
     </section>
     <section class="right" id="components"></section>
   </main>

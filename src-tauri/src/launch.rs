@@ -10,6 +10,11 @@ use std::time::Duration;
 
 const RESTORE_AFTER_SECS: u64 = 120;
 
+/// Opt-in JFR (user 11-18). Same folder + settings as Resources\Debugging\clients.md "JFR on a client"; %t puts the
+/// start time in the name so a later launch doesn't overwrite the last recording. Written when the game quits normally.
+pub const JFR_DIR: &str = "C:\\BGjfr";
+const JFR_ARG: &str = "-XX:StartFlightRecording=name=bg,settings=profile,method-profiling=high,maxage=20m,dumponexit=true,filename=C:/BGjfr/live-%t.jfr";
+
 fn own_copy() -> PathBuf { files::data_dir().join("player-json-backup.json") }
 fn state_file() -> PathBuf { files::data_dir().join("launch-state.json") }
 
@@ -86,11 +91,16 @@ pub fn game_running() -> bool {
     }
 }
 
+/// Heap for a PC's RAM (GB). The page's RAM dropdown uses the same table (main.js RAM_HEAP); keep them matching.
+/// clients.md advice: 8 GB heap on 16 GB, 10 GB on 32 GB; 0.1.2 adds 12 GB at 64 GB+, 6 at 12 GB, 4 at 8 GB (was 6).
+pub fn heap_for_ram(ram: u64) -> u64 {
+    if ram >= 60 { 12 } else if ram >= 30 { 10 } else if ram >= 15 { 8 } else if ram >= 11 { 6 } else { 4 }
+}
+
 /// Default JVM set (Debugging\clients.md "Advice given" 2026-11-14): G1, 50 ms pause target, bigger code cache and
-/// metaspace; heap by RAM (10 GB at 32 GB+, 8 GB at 16 GB+, else 6 GB).
+/// metaspace; heap by RAM (heap_for_ram).
 pub fn default_jvm_args() -> String {
-    let ram = files::total_ram_gb();
-    let heap = if ram >= 30 { 10 } else if ram >= 15 { 8 } else { 6 };
+    let heap = heap_for_ram(files::total_ram_gb());
     format!("-Xms{heap}g -Xmx{heap}g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m")
 }
 
@@ -105,7 +115,7 @@ fn replaced(a: &str) -> bool {
 }
 
 /// The json for this launch, built from the player's own one.
-fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool) -> Value {
+fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool, jfr: bool) -> Value {
     let mut j = own.clone();
     let mut vm: Vec<Value> = own["vmArgs"].as_array().cloned().unwrap_or_default()
         .into_iter().filter(|v| v.as_str().map(|s| !replaced(s)).unwrap_or(false)).collect();
@@ -114,6 +124,7 @@ fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool) -> Value {
     }
     if zb { vm.push(json!("-agentlib:zbNative")); }
     if pzo { vm.push(json!("-XX:+EnableDynamicAgentLoading")); }
+    if jfr { vm.push(json!(JFR_ARG)); }
     j["vmArgs"] = Value::Array(vm);
     if let Some(o) = j.as_object_mut() { o.remove("windows"); } // per-OS GC flags would clash with ours
     let mut cp: Vec<Value> = vec![json!(".")];
@@ -125,9 +136,13 @@ fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool) -> Value {
     j
 }
 
-pub fn launch(game: &Path, jvm_args: &str) -> Result<String, String> {
+pub fn launch(game: &Path, jvm_args: &str, jfr: bool) -> Result<String, String> {
     if game_running() {
         return Err("Project Zomboid is already running".into());
+    }
+    // JFR doesn't create missing folders: no folder, no recording
+    if jfr {
+        fs::create_dir_all(JFR_DIR).map_err(|e| format!("can't create {JFR_DIR} for the JFR recording: {e}"))?;
     }
     let zb = files::component_state(game, "zombiebuddy") == "approved";
     let pzo = files::component_state(game, "pzo") == "approved";
@@ -140,7 +155,7 @@ pub fn launch(game: &Path, jvm_args: &str) -> Result<String, String> {
     }
     let own: Value = serde_json::from_slice(&fs::read(own_copy()).map_err(|e| e.to_string())?)
         .map_err(|e| format!("your {GAME_JSON} isn't valid json: {e}"))?;
-    let j = launch_json(&own, jvm_args, zb, pzo);
+    let j = launch_json(&own, jvm_args, zb, pzo, jfr);
     let text = serde_json::to_string_pretty(&j).map_err(|e| e.to_string())?;
     remember_ours(files::sha256_bytes(text.as_bytes()));
     fs::write(&path, &text).map_err(|e| format!("can't write {GAME_JSON}: {e}"))?;
@@ -178,8 +193,9 @@ pub fn launch(game: &Path, jvm_args: &str) -> Result<String, String> {
         restore(&g);
     });
     Ok(format!(
-        "Started: ZombieBuddy {}, PZO {}",
+        "Started: ZombieBuddy {}, PZO {}{}",
         if zb { "on" } else { "off (not installed)" },
-        if pzo { "on" } else { "off (not installed)" }
+        if pzo { "on" } else { "off (not installed)" },
+        if jfr { format!(", JFR recording to {JFR_DIR} (quit through the game menu)") } else { String::new() }
     ))
 }
