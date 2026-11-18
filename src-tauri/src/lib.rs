@@ -47,6 +47,7 @@ struct Status {
     running: bool,
     jfr: bool,
     jfr_dir: String,
+    potato: bool,
     ram_gb: u64,
     warnings: Vec<String>,
 }
@@ -85,6 +86,7 @@ async fn get_status() -> Status {
         running: launch::game_running(),
         jfr: s.jfr,
         jfr_dir: launch::JFR_DIR.into(),
+        potato: potato_file().is_file(),
         ram_gb: files::total_ram_gb(),
         warnings,
     }
@@ -125,6 +127,26 @@ async fn set_jfr(on: bool) -> Result<String, String> {
     } else {
         "JFR recording off from the next launch".into()
     })
+}
+
+// Potato Mode (user 11-18): a flag file BluegrassCore reads at join (Compat_UIPerf.lua): lower graphics settings on
+// Bluegrass only, the player's own come back when they leave. The file existing is the setting; nothing in settings.json.
+fn potato_file() -> PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join("Zomboid").join("Lua").join("bluegrass_potato.txt")
+}
+
+#[tauri::command]
+async fn set_potato(on: bool) -> Result<String, String> {
+    let f = potato_file();
+    if on {
+        if let Some(dir) = f.parent() { fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?; }
+        fs::write(&f, "on, written by the Bluegrass launcher\n").map_err(|e| format!("can't write {}: {e}", f.display()))?;
+        Ok("Potato Mode on from your next Bluegrass join".into())
+    } else {
+        if f.exists() { fs::remove_file(&f).map_err(|e| format!("can't remove {}: {e}", f.display()))?; }
+        Ok("Potato Mode off from your next Bluegrass join".into())
+    }
 }
 
 #[tauri::command]
@@ -176,7 +198,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, install, launch_game,
+        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, set_potato, install, launch_game,
             check_update, apply_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

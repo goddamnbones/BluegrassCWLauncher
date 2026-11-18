@@ -46,6 +46,7 @@ async function refresh() {
   if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.jvm_args);
   $("ramNote").textContent = "This PC has " + s.ram_gb + " GB (Windows reports a little under the real size).";
   $("jfr").checked = s.jfr;
+  $("potato").checked = s.potato;
   $("jfrNote").textContent = "Saved to " + s.jfr_dir + " when you quit through the game menu (last 20 minutes). Applies from the next launch.";
   $("launch").disabled = s.running || !s.game_dir;
   $("launch").textContent = s.running ? "Project Zomboid is running" : "Launch Project Zomboid";
@@ -89,6 +90,7 @@ $("ram").addEventListener("change", () => {
   run($("ram"), () => invoke("set_jvm_args", { args }));
 });
 $("jfr").addEventListener("change", () => run($("jfr"), () => invoke("set_jfr", { on: $("jfr").checked })));
+$("potato").addEventListener("change", () => run($("potato"), () => invoke("set_potato", { on: $("potato").checked })));
 $("resetJvm").addEventListener("click", () => { $("jvm").value = defaults; });
 $("saveGame").addEventListener("click", () => run($("saveGame"), () => invoke("set_game_dir", { dir: $("game").value })));
 
