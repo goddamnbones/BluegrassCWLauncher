@@ -1,6 +1,6 @@
 [package]
 name = "bluegrasslauncher"
-version = "0.1.0"
+version = "0.1.1"
 description = "Bluegrass launcher: starts Project Zomboid with ZombieBuddy and PZO for one launch"
 authors = ["Bluegrass"]
 edition = "2024"
@@ -20,7 +20,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 ureq = "2"
 sha2 = "0.10"
 winreg = "0.55"
-windows-sys = { version = "0.59", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.59", features = ["Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
 tauri-plugin-updater = "2"
 
 [profile.release]

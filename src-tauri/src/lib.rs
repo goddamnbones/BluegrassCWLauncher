@@ -1,4 +1,4 @@
-// Bluegrass launcher (2026-11-18, docs in README.md). The page only calls the commands below; it never loads
+﻿// Bluegrass launcher (2026-11-18, docs in README.md). The page only calls the commands below; it never loads
 // anything remote. All downloads are pinned files checked against their SHA-256 (files.rs).
 mod files;
 mod launch;
@@ -47,7 +47,7 @@ struct Status {
 }
 
 #[tauri::command]
-fn get_status() -> Status {
+async fn get_status() -> Status {
     let s = load();
     let game = game_dir(&s);
     let mut warnings = Vec::new();
@@ -83,7 +83,7 @@ fn get_status() -> Status {
 }
 
 #[tauri::command]
-fn set_game_dir(dir: String) -> Result<String, String> {
+async fn set_game_dir(dir: String) -> Result<String, String> {
     let d = PathBuf::from(dir.trim());
     if !files::valid_game_dir(&d) {
         return Err("That folder has no ProjectZomboid64.exe and ProjectZomboid64.json".into());
@@ -95,7 +95,7 @@ fn set_game_dir(dir: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn set_jvm_args(args: String) -> Result<String, String> {
+async fn set_jvm_args(args: String) -> Result<String, String> {
     let mut s = load();
     let t = args.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.split_whitespace().any(|a| !a.starts_with('-')) {
@@ -118,7 +118,7 @@ async fn install(component: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn launch_game() -> Result<String, String> {
+async fn launch_game() -> Result<String, String> {
     let s = load();
     let game = game_dir(&s).ok_or("Game folder not found; set it first")?;
     let args = s.jvm_args.clone().unwrap_or_else(launch::default_jvm_args);

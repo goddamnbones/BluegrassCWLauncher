@@ -56,12 +56,34 @@ pub fn restore(game: &Path) -> Option<String> {
     Some("Your own ProjectZomboid64.json is back (Steam launches as before)".into())
 }
 
+// Process list straight from Windows (no tasklist: that flashed a console window and froze the page, user 11-18).
 pub fn game_running() -> bool {
-    Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {GAME_EXE}"), "/NH"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains(&GAME_EXE.to_lowercase()))
-        .unwrap_or(false)
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    let want: Vec<u16> = GAME_EXE.to_lowercase().encode_utf16().collect();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            let name: Vec<u16> = String::from_utf16_lossy(&e.szExeFile[..len]).to_lowercase().encode_utf16().collect();
+            if name == want {
+                found = true;
+                break;
+            }
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+        found
+    }
 }
 
 /// Default JVM set (Debugging\clients.md "Advice given" 2026-11-14): G1, 50 ms pause target, bigger code cache and

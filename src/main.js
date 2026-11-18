@@ -76,4 +76,10 @@ async function checkUpdate() {
 
 refresh().catch((e) => log(String(e), true));
 checkUpdate();
-setInterval(() => refresh().catch(() => {}), 5000);
+let busy = false; // never stack status calls
+setInterval(async () => {
+  if (busy) return;
+  busy = true;
+  try { await refresh(); } catch (_) {}
+  busy = false;
+}, 5000);

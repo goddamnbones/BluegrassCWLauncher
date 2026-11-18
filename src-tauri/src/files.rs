@@ -49,7 +49,26 @@ pub fn data_dir() -> PathBuf {
     d
 }
 
+// path -> (size, modified, hash): the page asks for status every 5 s; only re-hash a file when it changed
+static HASH_CACHE: std::sync::Mutex<Vec<(PathBuf, u64, std::time::SystemTime, String)>> = std::sync::Mutex::new(Vec::new());
+
 pub fn sha256_file(p: &Path) -> Option<String> {
+    let meta = fs::metadata(p).ok()?;
+    let (size, modified) = (meta.len(), meta.modified().ok()?);
+    if let Ok(c) = HASH_CACHE.lock() {
+        if let Some(e) = c.iter().find(|e| e.0 == p && e.1 == size && e.2 == modified) {
+            return Some(e.3.clone());
+        }
+    }
+    let h = sha256_uncached(p)?;
+    if let Ok(mut c) = HASH_CACHE.lock() {
+        c.retain(|e| e.0 != p);
+        c.push((p.to_path_buf(), size, modified, h.clone()));
+    }
+    Some(h)
+}
+
+fn sha256_uncached(p: &Path) -> Option<String> {
     let mut f = fs::File::open(p).ok()?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
