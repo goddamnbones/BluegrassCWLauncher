@@ -1,6 +1,6 @@
 [package]
 name = "bluegrasslauncher"
-version = "0.1.3"
+version = "0.1.4"
 description = "Bluegrass launcher: starts Project Zomboid with ZombieBuddy and PZO for one launch"
 authors = ["Bluegrass"]
 edition = "2024"

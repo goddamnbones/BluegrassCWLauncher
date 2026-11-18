@@ -18,7 +18,7 @@ function log(msg, bad) {
 let defaults = "";
 
 // RAM dropdown -> heap GB. Same table as launch.rs heap_for_ram; keep them matching.
-const RAM_HEAP = { 8: 4, 12: 6, 16: 8, 32: 10, 64: 12 };
+const RAM_HEAP = { 8: 4, 12: 6, 16: 8, 32: 12, 64: 16 };
 
 function heapOf(args) {
   const m = /(?:^|\s)-Xmx(\d+)g(?:\s|$)/i.exec(args);

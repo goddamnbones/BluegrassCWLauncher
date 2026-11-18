@@ -92,9 +92,10 @@ pub fn game_running() -> bool {
 }
 
 /// Heap for a PC's RAM (GB). The page's RAM dropdown uses the same table (main.js RAM_HEAP); keep them matching.
-/// clients.md advice: 8 GB heap on 16 GB, 10 GB on 32 GB; 0.1.2 adds 12 GB at 64 GB+, 6 at 12 GB, 4 at 8 GB (was 6).
+/// 0.1.2: 4/6/8 GB heap at 8/12/16 GB RAM. 0.1.4 (user 11-18): 12 GB at 32 GB (was 10), 16 GB at 64 GB+ (was 12):
+/// JustPunished (4K, zoomed out 2.5 while driving) filled a 10 GB heap, 53 GCs a minute, 0.6-1.1 s stutters.
 pub fn heap_for_ram(ram: u64) -> u64 {
-    if ram >= 60 { 12 } else if ram >= 30 { 10 } else if ram >= 15 { 8 } else if ram >= 11 { 6 } else { 4 }
+    if ram >= 60 { 16 } else if ram >= 30 { 12 } else if ram >= 15 { 8 } else if ram >= 11 { 6 } else { 4 }
 }
 
 /// Default JVM set (Debugging\clients.md "Advice given" 2026-11-14): G1, 50 ms pause target, bigger code cache and
