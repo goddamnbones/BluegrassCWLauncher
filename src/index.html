@@ -50,6 +50,10 @@
       <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
       <details id="changes">
         <summary>What's new</summary>
+        <h3>0.1.5</h3>
+        <ul>
+          <li>Uninstall button for ZombieBuddy and PZO: removes the approved files from the game folder (asks first).</li>
+        </ul>
         <h3>0.1.4</h3>
         <ul>
           <li>More memory for the game on big PCs: 32 GB PCs now get 12 GB (was 10), 64 GB+ PCs get 16 GB (was 12). Fixes heavy stutter when zoomed out while driving at high resolutions.</li>
@@ -77,5 +81,14 @@
     </section>
     <section class="right" id="components"></section>
   </main>
+  <dialog id="confirm">
+    <form method="dialog">
+      <p id="confirmText"></p>
+      <div class="row">
+        <button value="ok" class="primary">Uninstall</button>
+        <button value="cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

@@ -84,6 +84,14 @@ button.primary:hover:not(:disabled) { background: var(--accent-hi); border-color
 .card p { margin: 2px 0 8px; font-size: 12px; }
 .card .state { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .card button { width: 100%; }
+.card button + button { margin-top: 6px; }
+
+#confirm {
+  max-width: 380px; padding: 16px 18px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--warn);
+}
+#confirm::backdrop { background: rgba(0, 0, 0, 0.55); }
+#confirm p { margin: 0 0 12px; }
 .card.approved { border-left-color: var(--ok); }
 .card.approved .state { color: var(--ok); }
 .card.missing .state { color: var(--muted); }

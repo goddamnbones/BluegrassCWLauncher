@@ -65,8 +65,25 @@ async function refresh() {
     });
     btn.addEventListener("click", () => run(btn, () => invoke("install", { component: c.id })));
     card.append(title, ver, st, btn);
+    if (c.state === "approved") { // only our approved files; a different version is left alone
+      const un = Object.assign(document.createElement("button"), { textContent: "Uninstall", disabled: s.running });
+      un.addEventListener("click", async () => {
+        if (await confirmBox("Remove " + c.name + " from the game folder? Launches go without it until you install it again."))
+          run(un, () => invoke("uninstall", { component: c.id }));
+      });
+      card.append(un);
+    }
     return card;
   }));
+}
+
+// in-page OK/Cancel (index.html #confirm); resolves true on OK
+function confirmBox(text) {
+  const d = $("confirm");
+  $("confirmText").textContent = text;
+  d.returnValue = "";
+  d.showModal();
+  return new Promise((res) => d.addEventListener("close", () => res(d.returnValue === "ok"), { once: true }));
 }
 
 async function run(btn, fn) {
