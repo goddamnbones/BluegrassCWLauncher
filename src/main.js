@@ -17,6 +17,9 @@ function log(msg, bad) {
 
 let defaults = "";
 
+// Diagnostics checkboxes: element id = settings key = set_diag key (lib.rs)
+const DIAG = ["nmt", "no_pzo", "no_handoff", "no_fsr"];
+
 // RAM dropdown -> heap GB. Same table as launch.rs heap_for_ram; keep them matching.
 const RAM_HEAP = { 8: 4, 12: 6, 16: 8, 32: 12, 64: 16 };
 
@@ -47,6 +50,8 @@ async function refresh() {
   $("ramNote").textContent = "This PC has " + s.ram_gb + " GB (Windows reports a little under the real size).";
   $("jfr").checked = s.jfr;
   $("potato").checked = s.potato;
+  for (const k of DIAG) $(k).checked = s[k];
+  if (DIAG.some((k) => s[k])) $("diag").open = true; // a ticked switch is never hidden
   $("jfrNote").textContent = "Saved to " + s.jfr_dir + " when you quit through the game menu (last 20 minutes). Applies from the next launch.";
   $("launch").disabled = s.running || !s.game_dir;
   $("launch").textContent = s.running ? "Project Zomboid is running" : "Launch Project Zomboid";
@@ -108,6 +113,9 @@ $("ram").addEventListener("change", () => {
 });
 $("jfr").addEventListener("change", () => run($("jfr"), () => invoke("set_jfr", { on: $("jfr").checked })));
 $("potato").addEventListener("change", () => run($("potato"), () => invoke("set_potato", { on: $("potato").checked })));
+for (const k of DIAG) {
+  $(k).addEventListener("change", () => run($(k), () => invoke("set_diag", { key: k, on: $(k).checked })));
+}
 $("resetJvm").addEventListener("click", () => { $("jvm").value = defaults; });
 $("saveGame").addEventListener("click", () => run($("saveGame"), () => invoke("set_game_dir", { dir: $("game").value })));
 

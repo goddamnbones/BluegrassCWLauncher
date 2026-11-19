@@ -1,5 +1,6 @@
 ﻿// Bluegrass launcher (2026-11-18, docs in README.md). The page only calls the commands below; it never loads
 // anything remote. All downloads are pinned files checked against their SHA-256 (files.rs).
+mod diag;
 mod files;
 mod launch;
 
@@ -13,6 +14,15 @@ struct Settings {
     jvm_args: Option<String>,
     #[serde(default)]
     jfr: bool,
+    // Diagnostics panel (user 11-19, item 283); stay ticked until the player unticks them
+    #[serde(default)]
+    nmt: bool,
+    #[serde(default)]
+    no_pzo: bool,
+    #[serde(default)]
+    no_handoff: bool,
+    #[serde(default)]
+    no_fsr: bool,
 }
 
 fn settings_path() -> PathBuf { files::data_dir().join("settings.json") }
@@ -47,6 +57,10 @@ struct Status {
     running: bool,
     jfr: bool,
     jfr_dir: String,
+    nmt: bool,
+    no_pzo: bool,
+    no_handoff: bool,
+    no_fsr: bool,
     potato: bool,
     ram_gb: u64,
     warnings: Vec<String>,
@@ -86,6 +100,10 @@ async fn get_status() -> Status {
         running: launch::game_running(),
         jfr: s.jfr,
         jfr_dir: launch::JFR_DIR.into(),
+        nmt: s.nmt,
+        no_pzo: s.no_pzo,
+        no_handoff: s.no_handoff,
+        no_fsr: s.no_fsr,
         potato: potato_file().is_file(),
         ram_gb: files::total_ram_gb(),
         warnings,
@@ -132,8 +150,27 @@ async fn set_jfr(on: bool) -> Result<String, String> {
 // Potato Mode (user 11-18): a flag file BluegrassCore reads at join (Compat_UIPerf.lua): lower graphics settings on
 // Bluegrass only, the player's own come back when they leave. The file existing is the setting; nothing in settings.json.
 fn potato_file() -> PathBuf {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join("Zomboid").join("Lua").join("bluegrass_potato.txt")
+    diag::zomboid_lua_dir().join("bluegrass_potato.txt")
+}
+
+// Diagnostics panel (user 11-19): staff ask a player to tick one when chasing a problem. The two PZO switches change
+// PZO's own files (diag.rs) at once when the game is closed, and again at every launch.
+#[tauri::command]
+async fn set_diag(key: String, on: bool) -> Result<String, String> {
+    let mut s = load();
+    let what = match key.as_str() {
+        "nmt" => { s.nmt = on; "Native memory tracking" }
+        "no_pzo" => { s.no_pzo = on; "Launch without PZO" }
+        "no_handoff" => { s.no_handoff = on; "PZO texture handoff off" }
+        "no_fsr" => { s.no_fsr = on; "PZO FSR off" }
+        _ => return Err(format!("unknown switch {key}")),
+    };
+    save(&s)?;
+    let mut msg = format!("{what}: {} from the next launch", if on { "on" } else { "off" });
+    if (key == "no_handoff" || key == "no_fsr") && !launch::game_running() {
+        for n in diag::apply_pzo(s.no_handoff, s.no_fsr)? { msg += "; "; msg += &n; }
+    }
+    Ok(msg)
 }
 
 #[tauri::command]
@@ -176,7 +213,13 @@ async fn launch_game() -> Result<String, String> {
     let s = load();
     let game = game_dir(&s).ok_or("Game folder not found; set it first")?;
     let args = s.jvm_args.clone().unwrap_or_else(launch::default_jvm_args);
-    launch::launch(&game, &args, s.jfr)
+    let notes = if launch::game_running() { Vec::new() } else { diag::apply_pzo(s.no_handoff, s.no_fsr)? };
+    let o = launch::Opts { jfr: s.jfr, nmt: s.nmt, no_pzo: s.no_pzo };
+    let mut msg = launch::launch(&game, &args, &o)?;
+    if s.no_handoff { msg += ", PZO texture handoff off"; }
+    if s.no_fsr { msg += ", PZO FSR off"; }
+    for n in notes { msg += "; "; msg += &n; }
+    Ok(msg)
 }
 
 // Self-update: Tauri's updater checks our GitHub release's latest.json and refuses any installer whose signature
@@ -209,7 +252,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, set_potato, install, uninstall, launch_game,
+        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, set_diag, set_potato, install, uninstall, launch_game,
             check_update, apply_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

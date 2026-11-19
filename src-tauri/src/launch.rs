@@ -14,6 +14,16 @@ const RESTORE_AFTER_SECS: u64 = 120;
 /// start time in the name so a later launch doesn't overwrite the last recording. Written when the game quits normally.
 pub const JFR_DIR: &str = "C:\\BGjfr";
 const JFR_ARG: &str = "-XX:StartFlightRecording=name=bg,settings=profile,method-profiling=high,maxage=20m,dumponexit=true,filename=C:/BGjfr/live-%t.jfr";
+/// Diagnostics (user 11-19): lets `jcmd <pid> VM.native_memory summary` split the JVM's own native memory.
+const NMT_ARG: &str = "-XX:NativeMemoryTracking=summary";
+
+/// Per-launch switches from the launcher's settings.
+pub struct Opts {
+    pub jfr: bool,
+    pub nmt: bool,
+    /// Diagnostics "Launch without PZO": PZO stays installed, this launch skips it.
+    pub no_pzo: bool,
+}
 
 fn own_copy() -> PathBuf { files::data_dir().join("player-json-backup.json") }
 fn state_file() -> PathBuf { files::data_dir().join("launch-state.json") }
@@ -110,13 +120,13 @@ fn replaced(a: &str) -> bool {
     let a = a.trim();
     a.starts_with("-Xms") || a.starts_with("-Xmx") || (a.starts_with("-XX:") && a.ends_with("GC") && a.contains("Use"))
         || ["MaxGCPauseMillis", "ReservedCodeCacheSize", "MetaspaceSize", "AlwaysPreTouch", "ZAllocationSpikeTolerance",
-            "UseNUMA", "UseTypeSpeculation", "EnableDynamicAgentLoading", "StartFlightRecording"]
+            "UseNUMA", "UseTypeSpeculation", "EnableDynamicAgentLoading", "StartFlightRecording", "NativeMemoryTracking"]
             .iter().any(|k| a.contains(k))
         || a.starts_with("-agentlib:pzo_native64") || a.starts_with("-agentlib:zbNative") || a.starts_with("-javaagent:")
 }
 
 /// The json for this launch, built from the player's own one.
-fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool, jfr: bool) -> Value {
+fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool, jfr: bool, nmt: bool) -> Value {
     let mut j = own.clone();
     let mut vm: Vec<Value> = own["vmArgs"].as_array().cloned().unwrap_or_default()
         .into_iter().filter(|v| v.as_str().map(|s| !replaced(s)).unwrap_or(false)).collect();
@@ -126,6 +136,7 @@ fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool, jfr: bool) -> V
     if zb { vm.push(json!("-agentlib:zbNative")); }
     if pzo { vm.push(json!("-XX:+EnableDynamicAgentLoading")); }
     if jfr { vm.push(json!(JFR_ARG)); }
+    if nmt { vm.push(json!(NMT_ARG)); }
     j["vmArgs"] = Value::Array(vm);
     if let Some(o) = j.as_object_mut() { o.remove("windows"); } // per-OS GC flags would clash with ours
     let mut cp: Vec<Value> = vec![json!(".")];
@@ -137,7 +148,8 @@ fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool, jfr: bool) -> V
     j
 }
 
-pub fn launch(game: &Path, jvm_args: &str, jfr: bool) -> Result<String, String> {
+pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
+    let jfr = o.jfr;
     if game_running() {
         return Err("Project Zomboid is already running".into());
     }
@@ -146,7 +158,8 @@ pub fn launch(game: &Path, jvm_args: &str, jfr: bool) -> Result<String, String> 
         fs::create_dir_all(JFR_DIR).map_err(|e| format!("can't create {JFR_DIR} for the JFR recording: {e}"))?;
     }
     let zb = files::component_state(game, "zombiebuddy") == "approved";
-    let pzo = files::component_state(game, "pzo") == "approved";
+    let pzo_installed = files::component_state(game, "pzo") == "approved";
+    let pzo = pzo_installed && !o.no_pzo;
     let path = game.join(GAME_JSON);
     let cur = fs::read(&path).map_err(|e| format!("can't read {GAME_JSON}: {e}"))?;
     let h = files::sha256_bytes(&cur);
@@ -156,7 +169,7 @@ pub fn launch(game: &Path, jvm_args: &str, jfr: bool) -> Result<String, String> 
     }
     let own: Value = serde_json::from_slice(&fs::read(own_copy()).map_err(|e| e.to_string())?)
         .map_err(|e| format!("your {GAME_JSON} isn't valid json: {e}"))?;
-    let j = launch_json(&own, jvm_args, zb, pzo, jfr);
+    let j = launch_json(&own, jvm_args, zb, pzo, jfr, o.nmt);
     let text = serde_json::to_string_pretty(&j).map_err(|e| e.to_string())?;
     remember_ours(files::sha256_bytes(text.as_bytes()));
     fs::write(&path, &text).map_err(|e| format!("can't write {GAME_JSON}: {e}"))?;
@@ -196,7 +209,8 @@ pub fn launch(game: &Path, jvm_args: &str, jfr: bool) -> Result<String, String> 
     Ok(format!(
         "Started: ZombieBuddy {}, PZO {}{}",
         if zb { "on" } else { "off (not installed)" },
-        if pzo { "on" } else { "off (not installed)" },
-        if jfr { format!(", JFR recording to {JFR_DIR} (quit through the game menu)") } else { String::new() }
+        if pzo { "on" } else if pzo_installed { "off (Diagnostics)" } else { "off (not installed)" },
+        (if jfr { format!(", JFR recording to {JFR_DIR} (quit through the game menu)") } else { String::new() })
+            + if o.nmt { ", native memory tracking on" } else { "" }
     ))
 }

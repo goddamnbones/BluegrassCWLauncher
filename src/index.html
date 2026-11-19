@@ -41,6 +41,17 @@
       <p class="muted small" id="jfrNote"></p>
       <label class="check"><input id="potato" type="checkbox" /> Potato Mode (for low-end PCs)</label>
       <p class="muted small">Lower graphics settings while you play on Bluegrass. Your own settings come back when you leave.</p>
+      <details id="diag">
+        <summary>Diagnostics (only when staff ask)</summary>
+        <p class="muted small">Each stays on until you untick it and applies from the next launch.</p>
+        <label class="check"><input id="nmt" type="checkbox" /> Native memory tracking</label>
+        <p class="muted small">Lets staff see the game's memory outside Java (a little slower).</p>
+        <label class="check"><input id="no_pzo" type="checkbox" /> Launch without PZO</label>
+        <p class="muted small">PZO stays installed; launches skip it.</p>
+        <label class="check"><input id="no_handoff" type="checkbox" /> PZO texture handoff off</label>
+        <label class="check"><input id="no_fsr" type="checkbox" /> PZO FSR upscaler off</label>
+        <p class="muted small">Sets PZO's own setting off at each launch; your previous setting comes back when you untick.</p>
+      </details>
       <label for="game">Game folder</label>
       <div class="row">
         <input id="game" type="text" spellcheck="false" />
@@ -50,6 +61,10 @@
       <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
       <details id="changes">
         <summary>What's new</summary>
+        <h3>0.1.6</h3>
+        <ul>
+          <li>Diagnostics panel for when staff ask: native memory tracking, launch without PZO, PZO texture handoff off, PZO FSR off.</li>
+        </ul>
         <h3>0.1.5</h3>
         <ul>
           <li>Uninstall button for ZombieBuddy and PZO: removes the approved files from the game folder (asks first).</li>
