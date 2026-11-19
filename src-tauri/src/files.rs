@@ -34,10 +34,10 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         component: "pzo",
-        version: "2.2",
+        version: "2.3",
         file: "PZOptimEngine.jar",
-        url: "https://github.com/prop11/PZO-Launcher/releases/download/V2.2/PZOptimEngine.jar",
-        sha256: "026de0512c6058e00f2df1f30d68c1acddeb6efee27877a6015a49f1da2d4d5b",
+        url: "https://github.com/prop11/PZO-Launcher/releases/download/V2.3/PZOptimEngine.jar",
+        sha256: "44fa7ea243cbf8d26ec8c24e8152e3fe1e0fdf5ee002541773edda48df01c717",
     },
 ];
 
