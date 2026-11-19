@@ -161,6 +161,21 @@ pub fn install(game: &Path, component: &str) -> Result<String, String> {
     Ok(format!("{} {} installed", component, files[0].version))
 }
 
+/// Deletes a component's files, only when every one is our approved version (a different version is not ours to remove).
+pub fn uninstall(game: &Path, component: &str) -> Result<String, String> {
+    let files: Vec<&Pinned> = PINNED.iter().filter(|p| p.component == component).collect();
+    if files.is_empty() {
+        return Err(format!("unknown component {component}"));
+    }
+    if component_state(game, component) != "approved" {
+        return Err(format!("{component} is not the approved version; nothing was removed"));
+    }
+    for p in &files {
+        fs::remove_file(game.join(p.file)).map_err(|e| format!("remove {} failed (is the game running?): {e}", p.file))?;
+    }
+    Ok(format!("{} {} uninstalled", component, files[0].version))
+}
+
 /// ZombieBuddy issue #88: stray JVM dlls in the game root make zbNative load a second libjava (breaks networking).
 pub fn stray_jvm_dlls(game: &Path) -> Vec<String> {
     ["java.dll", "instrument.dll", "jvm.dll"]

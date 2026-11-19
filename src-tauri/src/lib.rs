@@ -161,6 +161,17 @@ async fn install(component: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn uninstall(component: String) -> Result<String, String> {
+    let game = game_dir(&load()).ok_or("Game folder not found; set it first")?;
+    if launch::game_running() {
+        return Err("Close Project Zomboid first".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || files::uninstall(&game, &component))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn launch_game() -> Result<String, String> {
     let s = load();
     let game = game_dir(&s).ok_or("Game folder not found; set it first")?;
@@ -198,7 +209,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, set_potato, install, launch_game,
+        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, set_potato, install, uninstall, launch_game,
             check_update, apply_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
