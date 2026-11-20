@@ -85,7 +85,7 @@ async function refresh() {
     const card = document.createElement("div");
     card.className = "card " + c.state;
     const title = Object.assign(document.createElement("h2"), { textContent: c.name });
-    const ver = Object.assign(document.createElement("p"), { className: "muted", textContent: "Approved version " + c.version });
+    const ver = Object.assign(document.createElement("p"), { className: "muted", textContent: c.version === "latest" ? "Latest release" : "Approved version " + c.version });
     const st = Object.assign(document.createElement("p"), { className: "state", textContent: STATE_TEXT[c.state] || c.state });
     const btn = Object.assign(document.createElement("button"), {
       textContent: c.state === "approved" ? "Reinstall" : "Install",

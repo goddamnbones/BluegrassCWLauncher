@@ -32,14 +32,40 @@ pub const PINNED: &[Pinned] = &[
         url: "https://github.com/zed-0xff/ZombieBuddy/releases/download/v2.3.3/zbNative.dll",
         sha256: "c2ae9335e717ee24b2f4a40d1a3bf77f1519762a72a0459e766a2bbafc077f6c",
     },
+    // PZO: always the latest GitHub release (user 11-20); no hash, any PZOptimEngine.jar present counts as installed
     Pinned {
         component: "pzo",
-        version: "2.3",
+        version: LATEST,
         file: "PZOptimEngine.jar",
-        url: "https://github.com/prop11/PZO-Launcher/releases/download/V2.3/PZOptimEngine.jar",
-        sha256: "44fa7ea243cbf8d26ec8c24e8152e3fe1e0fdf5ee002541773edda48df01c717",
+        url: "https://api.github.com/repos/prop11/PZO-Launcher/releases/latest",
+        sha256: "",
     },
 ];
+
+/// version of an unpinned component: url is the GitHub "latest release" API, the asset named `file` is downloaded
+pub const LATEST: &str = "latest";
+
+/// download url + release tag of the asset named `file` in the latest release
+fn latest_asset(api: &str, file: &str) -> Result<(String, String), String> {
+    let body = ureq::get(api)
+        .set("User-Agent", "BluegrassLauncher")
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("latest release lookup failed: {e}"))?
+        .into_string()
+        .map_err(|e| format!("latest release lookup failed: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("latest release lookup failed: {e}"))?;
+    let tag = v["tag_name"].as_str().unwrap_or("?").to_string();
+    let url = v["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some(file)))
+        .and_then(|x| x["browser_download_url"].as_str())
+        .ok_or_else(|| format!("latest release {tag} has no {file}"))?;
+    if !url.starts_with("https://github.com/") {
+        return Err(format!("unexpected download url {url}"));
+    }
+    Ok((url.to_string(), tag))
+}
 
 /// %LOCALAPPDATA%\BluegrassLauncher (settings, the player's own json copy, launch state)
 pub fn data_dir() -> PathBuf {
@@ -122,7 +148,7 @@ pub fn component_state(game: &Path, component: &str) -> String {
     for p in PINNED.iter().filter(|p| p.component == component) {
         match sha256_file(&game.join(p.file)) {
             None => any_missing = true,
-            Some(h) if h != p.sha256 => any_other = true,
+            Some(h) if p.version != LATEST && h != p.sha256 => any_other = true,
             _ => {}
         }
     }
@@ -136,8 +162,17 @@ pub fn install(game: &Path, component: &str) -> Result<String, String> {
         return Err(format!("unknown component {component}"));
     }
     let mut got = Vec::new();
+    let mut version = files[0].version.to_string();
     for p in &files {
-        let resp = ureq::get(p.url)
+        let latest = p.version == LATEST;
+        let url = if latest {
+            let (u, tag) = latest_asset(p.url, p.file)?;
+            version = tag;
+            u
+        } else {
+            p.url.to_string()
+        };
+        let resp = ureq::get(&url)
             .set("User-Agent", "BluegrassLauncher")
             .call()
             .map_err(|e| format!("download {} failed: {e}", p.file))?;
@@ -147,7 +182,7 @@ pub fn install(game: &Path, component: &str) -> Result<String, String> {
             .read_to_end(&mut body)
             .map_err(|e| format!("download {} failed: {e}", p.file))?;
         let h = sha256_bytes(&body);
-        if h != p.sha256 {
+        if !latest && h != p.sha256 {
             return Err(format!("{} failed the hash check (got {h}); nothing was installed", p.file));
         }
         got.push((p, body));
@@ -158,7 +193,7 @@ pub fn install(game: &Path, component: &str) -> Result<String, String> {
         fs::write(&tmp, &body).map_err(|e| format!("write {} failed: {e}", p.file))?;
         fs::rename(&tmp, &dest).map_err(|e| format!("replace {} failed (is the game running?): {e}", p.file))?;
     }
-    Ok(format!("{} {} installed", component, files[0].version))
+    Ok(format!("{} {} installed", component, version))
 }
 
 /// Deletes a component's files, only when every one is our approved version (a different version is not ours to remove).
