@@ -15,39 +15,60 @@ function log(msg, bad) {
   $("log").prepend(line);
 }
 
-let defaults = "";
-
 // Diagnostics checkboxes: element id = settings key = set_diag key (lib.rs)
 const DIAG = ["nmt", "no_pzo", "no_handoff", "no_fsr"];
 
 // RAM dropdown -> heap GB. Same table as launch.rs heap_for_ram; keep them matching.
 const RAM_HEAP = { 8: 4, 12: 6, 16: 8, 32: 12, 64: 16 };
 
-function heapOf(args) {
-  const m = /(?:^|\s)-Xmx(\d+)g(?:\s|$)/i.exec(args);
-  return m ? Number(m[1]) : null;
-}
-
-// the option whose heap matches the saved -Xmx, else "custom"
-function ramChoice(args) {
-  const h = heapOf(args);
-  const hit = Object.keys(RAM_HEAP).find((k) => RAM_HEAP[k] === h);
+// the option whose heap matches the game memory setting, else "custom"
+function ramChoice(heap) {
+  const hit = Object.keys(RAM_HEAP).find((k) => RAM_HEAP[k] === heap);
   return hit || "custom";
 }
 
-function withHeap(args, gb) {
-  const rest = args.split(/\s+/).filter((a) => a && !/^-Xm[sx]/i.test(a));
-  return ["-Xms" + gb + "g", "-Xmx" + gb + "g", ...rest].join(" ");
+let stray = []; // [flag, keep|null] from get_status
+let strayKey = "";
+
+// one "keep" checkbox per flag; data-flag holds the flag
+function flagRows(list) {
+  return list.map(([flag, keep]) => {
+    const l = Object.assign(document.createElement("label"), { className: "check" });
+    const c = Object.assign(document.createElement("input"), { type: "checkbox", checked: keep !== false });
+    c.dataset.flag = flag;
+    const t = Object.assign(document.createElement("code"), { textContent: flag });
+    l.append(c, " Keep ", t, keep === null ? " (new)" : "");
+    return l;
+  });
+}
+
+function flagChoices(box) {
+  const out = {};
+  for (const c of box.querySelectorAll("input[data-flag]")) out[c.dataset.flag] = c.checked;
+  return out;
 }
 
 async function refresh() {
   const s = await invoke("get_status");
-  defaults = s.default_jvm_args;
   $("version").textContent = "launcher " + s.launcher;
   if (document.activeElement !== $("jvm")) $("jvm").value = s.jvm_args;
   if (document.activeElement !== $("game")) $("game").value = s.game_dir || "";
-  if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.jvm_args);
-  $("ramNote").textContent = "This PC has " + s.ram_gb + " GB (Windows reports a little under the real size).";
+  if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.heap_gb);
+  if (document.activeElement !== $("heap")) $("heap").value = s.heap_gb;
+  if (document.activeElement !== $("gc")) $("gc").value = s.gc;
+  $("ramNote").textContent = "This PC has " + s.ram_gb + " GB (Windows reports a little under the real size). Recommended game memory: " + s.default_heap + " GB.";
+  $("heapWarn").hidden = !(s.heap_gb > s.default_heap);
+  $("heapWarn").textContent = "Game memory " + s.heap_gb + " GB is above the " + s.default_heap + " GB recommended for this PC. Windows can run out of memory and the game can crash.";
+  $("ignoredNote").hidden = s.ignored.length === 0;
+  $("ignoredNote").textContent = "Ignored (set by the choices above): " + s.ignored.join(" ");
+  stray = s.stray;
+  const key = JSON.stringify(stray);
+  if (key !== strayKey) { // rebuild only on change, so a half-edited list isn't reset every 5 s
+    strayKey = key;
+    $("strayBox").hidden = stray.length === 0;
+    $("strayList").replaceChildren(...flagRows(stray));
+    $("straySummary").textContent = "Flags from your own game settings (" + stray.filter(([, k]) => k === false).length + " of " + stray.length + " dropped)";
+  }
   $("jfr").checked = s.jfr;
   $("potato").checked = s.potato;
   for (const k of DIAG) $(k).checked = s[k];
@@ -102,21 +123,47 @@ async function run(btn, fn) {
   refresh();
 }
 
-$("launch").addEventListener("click", () => run($("launch"), () => invoke("launch_game")));
+// new stray flags are asked about once before launching (user 11-20); Cancel doesn't launch
+async function askNewFlags() {
+  const fresh = stray.filter(([, k]) => k === null);
+  if (fresh.length === 0) return true;
+  const d = $("flagsDlg");
+  $("flagsList").replaceChildren(...flagRows(fresh));
+  d.returnValue = "";
+  d.showModal();
+  const ok = await new Promise((res) => d.addEventListener("close", () => res(d.returnValue === "ok"), { once: true }));
+  if (ok) log(await invoke("set_flags", { choices: flagChoices($("flagsList")) }));
+  return ok;
+}
+
+$("launch").addEventListener("click", async () => {
+  try {
+    if (!(await askNewFlags())) return;
+  } catch (e) {
+    log(String(e), true);
+    return;
+  }
+  run($("launch"), () => invoke("launch_game"));
+});
 $("saveJvm").addEventListener("click", () => run($("saveJvm"), () => invoke("set_jvm_args", { args: $("jvm").value })));
 $("ram").addEventListener("change", () => {
   const gb = RAM_HEAP[$("ram").value];
   if (!gb) return;
-  const args = withHeap($("jvm").value || defaults, gb);
-  $("jvm").value = args;
-  run($("ram"), () => invoke("set_jvm_args", { args }));
+  $("heap").value = gb;
+  run($("ram"), () => invoke("set_heap", { gb }));
+});
+$("saveHeap").addEventListener("click", () => run($("saveHeap"), () => invoke("set_heap", { gb: Number($("heap").value) })));
+$("gc").addEventListener("change", () => run($("gc"), () => invoke("set_gc", { gc: $("gc").value })));
+$("saveStray").addEventListener("click", () => {
+  strayKey = ""; // redraw from the saved answers
+  run($("saveStray"), () => invoke("set_flags", { choices: flagChoices($("strayList")) }));
 });
 $("jfr").addEventListener("change", () => run($("jfr"), () => invoke("set_jfr", { on: $("jfr").checked })));
 $("potato").addEventListener("change", () => run($("potato"), () => invoke("set_potato", { on: $("potato").checked })));
 for (const k of DIAG) {
   $(k).addEventListener("change", () => run($(k), () => invoke("set_diag", { key: k, on: $(k).checked })));
 }
-$("resetJvm").addEventListener("click", () => { $("jvm").value = defaults; });
+$("resetJvm").addEventListener("click", () => { $("jvm").value = ""; });
 $("saveGame").addEventListener("click", () => run($("saveGame"), () => invoke("set_game_dir", { dir: $("game").value })));
 
 $("update").addEventListener("click", () => run($("update"), () => invoke("apply_update")));

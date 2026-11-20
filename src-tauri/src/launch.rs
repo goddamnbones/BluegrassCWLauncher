@@ -23,6 +23,8 @@ pub struct Opts {
     pub nmt: bool,
     /// Diagnostics "Launch without PZO": PZO stays installed, this launch skips it.
     pub no_pzo: bool,
+    /// Flags from the player's own json they chose to drop (JVM tuner, user 11-20); left out of our launch only.
+    pub drop: Vec<String>,
 }
 
 fn own_copy() -> PathBuf { files::data_dir().join("player-json-backup.json") }
@@ -108,28 +110,60 @@ pub fn heap_for_ram(ram: u64) -> u64 {
     if ram >= 60 { 16 } else if ram >= 30 { 12 } else if ram >= 15 { 8 } else if ram >= 11 { 6 } else { 4 }
 }
 
-/// Default JVM set (Debugging\clients.md "Advice given" 2026-11-14): G1, 50 ms pause target, bigger code cache and
-/// metaspace; heap by RAM (heap_for_ram).
-pub fn default_jvm_args() -> String {
-    let heap = heap_for_ram(files::total_ram_gb());
-    format!("-Xms{heap}g -Xmx{heap}g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m")
+/// JVM tuner (user 11-20, after Weber's out-of-memory crashes with 16/20 GB heaps on 32 GB RAM): heap and GC are
+/// guided choices. G1 = Debugging\clients.md "Advice given" 2026-11-14 (50 ms pause target); ZGC for trials (no pause
+/// target, ZGC ignores it). Both get the bigger code cache and metaspace.
+pub fn guided_args(heap: u64, gc: &str) -> String {
+    let gc_set = if gc == "zgc" { "-XX:+UseZGC" } else { "-XX:+UseG1GC -XX:MaxGCPauseMillis=50" };
+    format!("-Xms{heap}g -Xmx{heap}g {gc_set} -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m")
+}
+
+/// Flags the guided choices own. Typed in the free-text field they're ignored: guided wins (user 11-20).
+pub fn guided_owned(a: &str) -> bool {
+    let a = a.trim();
+    a.starts_with("-Xms") || a.starts_with("-Xmx") || (a.starts_with("-XX:") && a.ends_with("GC") && a.contains("Use"))
+        || ["MaxGCPauseMillis", "ReservedCodeCacheSize", "MetaspaceSize"].iter().any(|k| a.contains(k))
 }
 
 // flags our set (or the launch) decides; dropped from the player's own vmArgs for this launch
 fn replaced(a: &str) -> bool {
     let a = a.trim();
-    a.starts_with("-Xms") || a.starts_with("-Xmx") || (a.starts_with("-XX:") && a.ends_with("GC") && a.contains("Use"))
-        || ["MaxGCPauseMillis", "ReservedCodeCacheSize", "MetaspaceSize", "AlwaysPreTouch", "ZAllocationSpikeTolerance",
+    guided_owned(a)
+        || ["AlwaysPreTouch", "ZAllocationSpikeTolerance",
             "UseNUMA", "UseTypeSpeculation", "EnableDynamicAgentLoading", "StartFlightRecording", "NativeMemoryTracking"]
             .iter().any(|k| a.contains(k))
         || a.starts_with("-agentlib:pzo_native64") || a.starts_with("-agentlib:zbNative") || a.starts_with("-javaagent:")
 }
 
+/// Flags the game, PZO or ZombieBuddy need: never asked about. There's no stock client json on the server, so this is
+/// the vanilla 42.22 server json's args plus what PZO's ZomboidConfigMigrator always writes (user OK 11-20).
+fn needed(a: &str) -> bool {
+    let a = a.trim();
+    ["--enable-native-access", "--add-exports", "--add-opens", "-Djava.library.path", "-Djava.awt.headless", "-Dzomboid.",
+        "-XX:-CreateCoredumpOnCrash", "-XX:-OmitStackTraceInFastThrow"]
+        .iter().any(|k| a.starts_with(k))
+}
+
+/// Flags in the player's own json (their Steam launch) that are neither needed nor ours (JVM tuner "stray flags", user
+/// 11-20): the page asks keep/drop once per flag. PZO adds its "performance args" (UseSuperWord, inline flags, ...)
+/// to the player's json, so those show up here too.
+pub fn stray_flags(game: &Path) -> Vec<String> {
+    let Ok(cur) = fs::read(game.join(GAME_JSON)) else { return Vec::new() };
+    let own = if is_ours(&read_state(), &files::sha256_bytes(&cur)) { fs::read(own_copy()).unwrap_or_default() } else { cur };
+    let Ok(v) = serde_json::from_slice::<Value>(&own) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for a in v["vmArgs"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+        let a = a.trim();
+        if !a.is_empty() && !replaced(a) && !needed(a) && !out.iter().any(|o| o == a) { out.push(a.to_string()); }
+    }
+    out
+}
+
 /// The json for this launch, built from the player's own one.
-fn launch_json(own: &Value, jvm_args: &str, zb: bool, pzo: bool, jfr: bool, nmt: bool) -> Value {
+fn launch_json(own: &Value, jvm_args: &str, drop: &[String], zb: bool, pzo: bool, jfr: bool, nmt: bool) -> Value {
     let mut j = own.clone();
     let mut vm: Vec<Value> = own["vmArgs"].as_array().cloned().unwrap_or_default()
-        .into_iter().filter(|v| v.as_str().map(|s| !replaced(s)).unwrap_or(false)).collect();
+        .into_iter().filter(|v| v.as_str().map(|s| !replaced(s) && !drop.iter().any(|d| d == s.trim())).unwrap_or(false)).collect();
     for a in jvm_args.split_whitespace() {
         vm.push(Value::String(a.to_string()));
     }
@@ -169,7 +203,7 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
     }
     let own: Value = serde_json::from_slice(&fs::read(own_copy()).map_err(|e| e.to_string())?)
         .map_err(|e| format!("your {GAME_JSON} isn't valid json: {e}"))?;
-    let j = launch_json(&own, jvm_args, zb, pzo, jfr, o.nmt);
+    let j = launch_json(&own, jvm_args, &o.drop, zb, pzo, jfr, o.nmt);
     let text = serde_json::to_string_pretty(&j).map_err(|e| e.to_string())?;
     remember_ours(files::sha256_bytes(text.as_bytes()));
     fs::write(&path, &text).map_err(|e| format!("can't write {GAME_JSON}: {e}"))?;
@@ -213,4 +247,35 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
         (if jfr { format!(", JFR recording to {JFR_DIR} (quit through the game menu)") } else { String::new() })
             + if o.nmt { ", native memory tracking on" } else { "" }
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Weber's crash-time args (hs_err_pid3864, 11-20)
+    const WEBER: &str = "--enable-native-access=ALL-UNNAMED --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED -Djava.library.path=win64/;.;natives/ -Dzomboid.steam=1 -Dzomboid.znetlog=1 -XX:-CreateCoredumpOnCrash -XX:-OmitStackTraceInFastThrow -XX:+PerfDisableSharedMem -XX:+UnlockExperimentalVMOptions -XX:+UseSuperWord -XX:MaxInlineLevel=15 -XX:InlineSmallCode=2500 -XX:+UseStringDeduplication -XX:+IgnoreUnrecognizedVMOptions -Doshi.util.wmi.timeout=5000 -XX:ShenandoahGCMode=generational -Xms20g -Xmx20g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m -agentlib:zbNative -XX:+EnableDynamicAgentLoading";
+
+    #[test]
+    fn sorts_weber_args() {
+        let stray: Vec<&str> = WEBER.split(' ').filter(|a| !replaced(a) && !needed(a)).collect();
+        assert_eq!(stray, ["-XX:+PerfDisableSharedMem", "-XX:+UnlockExperimentalVMOptions", "-XX:+UseSuperWord",
+            "-XX:MaxInlineLevel=15", "-XX:InlineSmallCode=2500", "-XX:+UseStringDeduplication",
+            "-XX:+IgnoreUnrecognizedVMOptions", "-Doshi.util.wmi.timeout=5000", "-XX:ShenandoahGCMode=generational"]);
+    }
+
+    #[test]
+    fn guided_sets() {
+        assert_eq!(guided_args(10, "g1"), "-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
+        assert_eq!(guided_args(12, "zgc"), "-Xms12g -Xmx12g -XX:+UseZGC -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
+        assert!(guided_owned("-XX:+UseShenandoahGC") && !guided_owned("-XX:ShenandoahGCMode=generational"));
+    }
+
+    #[test]
+    fn drop_leaves_flag_out() {
+        let own = json!({ "vmArgs": ["-Dzomboid.steam=1", "-XX:+UseSuperWord", "-Xmx3072m"] });
+        let j = launch_json(&own, &guided_args(10, "g1"), &["-XX:+UseSuperWord".to_string()], false, false, false, false);
+        let vm: Vec<&str> = j["vmArgs"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert!(vm.contains(&"-Dzomboid.steam=1") && vm.contains(&"-Xmx10g"));
+        assert!(!vm.contains(&"-XX:+UseSuperWord") && !vm.contains(&"-Xmx3072m"));
+    }
 }

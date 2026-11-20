@@ -5,13 +5,24 @@ mod files;
 mod launch;
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Settings {
     game_dir: Option<String>,
+    /// Free-text extra flags (0.1.8: heap and GC moved to heap_gb / gc; before that this held the whole set).
     jvm_args: Option<String>,
+    /// JVM tuner (user 11-20). None = the default for this PC's RAM (launch::heap_for_ram).
+    #[serde(default)]
+    heap_gb: Option<u64>,
+    /// "g1" (default) or "zgc".
+    #[serde(default)]
+    gc: Option<String>,
+    /// Keep (true) / drop (false) per stray flag from the player's own json, asked once per flag.
+    #[serde(default)]
+    flags: BTreeMap<String, bool>,
     #[serde(default)]
     jfr: bool,
     // Diagnostics panel (user 11-19, item 283); stay ticked until the player unticks them
@@ -28,7 +39,48 @@ struct Settings {
 fn settings_path() -> PathBuf { files::data_dir().join("settings.json") }
 
 fn load() -> Settings {
-    fs::read_to_string(settings_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    let mut s: Settings = fs::read_to_string(settings_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if migrate(&mut s) { let _ = save(&s); }
+    s
+}
+
+/// 0.1.7 and older kept heap + GC inside jvm_args: move them to the tuner's settings once, keep the rest as extras.
+fn migrate(s: &mut Settings) -> bool {
+    if s.heap_gb.is_some() || s.gc.is_some() { return false; }
+    let Some(old) = s.jvm_args.clone() else { return false };
+    if !old.split_whitespace().any(launch::guided_owned) { return false; }
+    for a in old.split_whitespace() {
+        if let Some(v) = a.strip_prefix("-Xmx") { s.heap_gb = heap_from(v); }
+    }
+    // the old default stays "default", so it follows the RAM table
+    if s.heap_gb == Some(launch::heap_for_ram(files::total_ram_gb())) { s.heap_gb = None; }
+    if old.contains("-XX:+UseZGC") { s.gc = Some("zgc".into()); } else { s.gc = Some("g1".into()); }
+    let rest: Vec<&str> = old.split_whitespace().filter(|a| !launch::guided_owned(a)).collect();
+    s.jvm_args = if rest.is_empty() { None } else { Some(rest.join(" ")) };
+    true
+}
+
+/// "12g" / "12288m" / "12G" -> 12
+fn heap_from(v: &str) -> Option<u64> {
+    let v = v.to_ascii_lowercase();
+    if let Some(n) = v.strip_suffix('g') { return n.parse().ok(); }
+    if let Some(n) = v.strip_suffix('m') { return n.parse::<u64>().ok().map(|m| (m + 512) / 1024); }
+    None
+}
+
+fn heap_of(s: &Settings) -> u64 { s.heap_gb.unwrap_or_else(|| launch::heap_for_ram(files::total_ram_gb())) }
+fn gc_of(s: &Settings) -> String { s.gc.clone().unwrap_or_else(|| "g1".into()) }
+
+/// Flags typed in the free-text field that the guided heap/GC choices override.
+fn ignored_extras(s: &Settings) -> Vec<String> {
+    s.jvm_args.as_deref().unwrap_or("").split_whitespace().filter(|a| launch::guided_owned(a)).map(String::from).collect()
+}
+
+/// The JVM flags for a launch: guided set, then the extras minus anything the guided set owns.
+fn launch_args(s: &Settings) -> String {
+    let mut v = vec![launch::guided_args(heap_of(s), &gc_of(s))];
+    v.extend(s.jvm_args.as_deref().unwrap_or("").split_whitespace().filter(|a| !launch::guided_owned(a)).map(String::from));
+    v.join(" ")
 }
 
 fn save(s: &Settings) -> Result<(), String> {
@@ -52,8 +104,16 @@ struct Status {
     launcher: &'static str,
     game_dir: Option<String>,
     components: Vec<Component>,
+    /// free-text extra flags
     jvm_args: String,
-    default_jvm_args: String,
+    heap_gb: u64,
+    /// the heap for this PC's RAM; the page warns above it (user 11-20: warn only)
+    default_heap: u64,
+    gc: String,
+    /// extras the guided choices override (shown as ignored)
+    ignored: Vec<String>,
+    /// flags from the player's own json: (flag, Some(keep) or None = not asked yet)
+    stray: Vec<(String, Option<bool>)>,
     running: bool,
     jfr: bool,
     jfr_dir: String,
@@ -90,13 +150,18 @@ async fn get_status() -> Status {
             if let Some(note) = launch::restore(g) { warnings.push(note); }
         }
     }
-    let def = launch::default_jvm_args();
+    let stray = game.as_ref().map(|g| launch::stray_flags(g)).unwrap_or_default()
+        .into_iter().map(|f| { let k = s.flags.get(&f).copied(); (f, k) }).collect();
     Status {
         launcher: env!("CARGO_PKG_VERSION"),
         game_dir: game.map(|g| g.display().to_string()),
         components: comps,
-        jvm_args: s.jvm_args.clone().unwrap_or_else(|| def.clone()),
-        default_jvm_args: def,
+        jvm_args: s.jvm_args.clone().unwrap_or_default(),
+        heap_gb: heap_of(&s),
+        default_heap: launch::heap_for_ram(files::total_ram_gb()),
+        gc: gc_of(&s),
+        ignored: ignored_extras(&s),
+        stray,
         running: launch::game_running(),
         jfr: s.jfr,
         jfr_dir: launch::JFR_DIR.into(),
@@ -131,7 +196,44 @@ async fn set_jvm_args(args: String) -> Result<String, String> {
     }
     s.jvm_args = if t.is_empty() { None } else { Some(t) };
     save(&s)?;
-    Ok("JVM settings saved".into())
+    let ign = ignored_extras(&s);
+    Ok(if ign.is_empty() { "Extra JVM flags saved".into() } else {
+        format!("Extra JVM flags saved; ignored because memory / garbage collector above decide them: {}", ign.join(" "))
+    })
+}
+
+// JVM tuner (user 11-20): guided heap (warn above the RAM default, never block) and GC (G1 or ZGC).
+#[tauri::command]
+async fn set_heap(gb: u64) -> Result<String, String> {
+    if !(2..=64).contains(&gb) { return Err("Game memory must be between 2 and 64 GB".into()); }
+    let mut s = load();
+    let def = launch::heap_for_ram(files::total_ram_gb());
+    s.heap_gb = if gb == def { None } else { Some(gb) };
+    save(&s)?;
+    Ok(if gb > def {
+        format!("Game memory {gb} GB from the next launch. That's above the {def} GB recommended for this PC: Windows can run out of memory and the game can crash")
+    } else {
+        format!("Game memory {gb} GB from the next launch")
+    })
+}
+
+#[tauri::command]
+async fn set_gc(gc: String) -> Result<String, String> {
+    if gc != "g1" && gc != "zgc" { return Err(format!("unknown garbage collector {gc}")); }
+    let mut s = load();
+    s.gc = Some(gc.clone());
+    save(&s)?;
+    Ok(format!("Garbage collector {} from the next launch", if gc == "zgc" { "ZGC" } else { "G1" }))
+}
+
+/// Keep/drop answers for stray flags from the player's own json; remembered per flag (user 11-20).
+#[tauri::command]
+async fn set_flags(choices: BTreeMap<String, bool>) -> Result<String, String> {
+    let mut s = load();
+    let dropped = choices.values().filter(|k| !**k).count();
+    for (f, k) in choices { s.flags.insert(f, k); }
+    save(&s)?;
+    Ok(format!("Flag choices saved ({dropped} dropped from launcher launches; your own game settings aren't changed)"))
 }
 
 // Opt-in JFR recording (user 11-18): staff ask a player to tick it when a problem needs a Java profile.
@@ -212,9 +314,11 @@ async fn uninstall(component: String) -> Result<String, String> {
 async fn launch_game() -> Result<String, String> {
     let s = load();
     let game = game_dir(&s).ok_or("Game folder not found; set it first")?;
-    let args = s.jvm_args.clone().unwrap_or_else(launch::default_jvm_args);
+    let args = launch_args(&s);
     let notes = if launch::game_running() { Vec::new() } else { diag::apply_pzo(s.no_handoff, s.no_fsr)? };
-    let o = launch::Opts { jfr: s.jfr, nmt: s.nmt, no_pzo: s.no_pzo };
+    // not-yet-answered stray flags are kept (the page asks before launching)
+    let drop = launch::stray_flags(&game).into_iter().filter(|f| s.flags.get(f) == Some(&false)).collect();
+    let o = launch::Opts { jfr: s.jfr, nmt: s.nmt, no_pzo: s.no_pzo, drop };
     let mut msg = launch::launch(&game, &args, &o)?;
     if s.no_handoff { msg += ", PZO texture handoff off"; }
     if s.no_fsr { msg += ", PZO FSR off"; }
@@ -252,8 +356,38 @@ async fn apply_update(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_jfr, set_diag, set_potato, install, uninstall, launch_game,
+        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_heap, set_gc, set_flags, set_jfr, set_diag, set_potato, install, uninstall, launch_game,
             check_update, apply_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heap_units() {
+        assert_eq!(heap_from("20g"), Some(20));
+        assert_eq!(heap_from("12288m"), Some(12));
+        assert_eq!(heap_from("x"), None);
+    }
+
+    #[test]
+    fn migrates_old_combined_field() {
+        let mut s = Settings { jvm_args: Some("-Xms20g -Xmx20g -XX:+UseZGC -XX:MaxGCPauseMillis=50 -XX:+UseSuperWord".into()), ..Default::default() };
+        assert!(migrate(&mut s));
+        assert_eq!(s.heap_gb, Some(20));
+        assert_eq!(s.gc.as_deref(), Some("zgc"));
+        assert_eq!(s.jvm_args.as_deref(), Some("-XX:+UseSuperWord"));
+        assert!(!migrate(&mut s)); // once only
+        assert_eq!(launch_args(&s), "-Xms20g -Xmx20g -XX:+UseZGC -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m -XX:+UseSuperWord");
+    }
+
+    #[test]
+    fn guided_wins_over_typed() {
+        let s = Settings { heap_gb: Some(10), gc: Some("g1".into()), jvm_args: Some("-Xmx20g -XX:+UseZGC -Dfoo=1".into()), ..Default::default() };
+        assert_eq!(ignored_extras(&s), ["-Xmx20g", "-XX:+UseZGC"]);
+        assert!(launch_args(&s).ends_with("-XX:MetaspaceSize=512m -Dfoo=1"));
+    }
 }

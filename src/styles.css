@@ -122,3 +122,6 @@ button.primary:hover:not(:disabled) { background: var(--accent-hi); border-color
 #changes ul { margin: 0 10px 8px; padding-left: 18px; color: var(--muted); font-size: 12px; }
 #changes li { margin: 2px 0; }
 #log .bad { color: var(--bad); }
+/* JVM tuner stray-flag rows (0.1.8) */
+#strayList label.check, #flagsList label.check { margin-top: 8px; }
+#strayList code, #flagsList code { font-family: Consolas, monospace; font-size: 12px; word-break: break-all; }

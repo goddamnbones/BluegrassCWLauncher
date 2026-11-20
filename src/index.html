@@ -31,12 +31,33 @@
         </select>
       </div>
       <p class="muted small" id="ramNote"></p>
-      <label for="jvm">JVM settings</label>
-      <textarea id="jvm" rows="3" spellcheck="false"></textarea>
+      <label for="heap">Game memory (GB)</label>
+      <div class="row">
+        <input id="heap" type="number" min="2" max="64" step="1" />
+        <button id="saveHeap">Set</button>
+      </div>
+      <p class="warn" id="heapWarn" hidden></p>
+      <label for="gc">Garbage collector</label>
+      <div class="row">
+        <select id="gc">
+          <option value="g1">G1 (recommended)</option>
+          <option value="zgc">ZGC (trial, when staff ask)</option>
+        </select>
+      </div>
+      <label for="jvm">Extra JVM flags (optional)</label>
+      <textarea id="jvm" rows="2" spellcheck="false"></textarea>
+      <p class="muted small">Memory and garbage collector flags typed here are ignored: the choices above decide them.</p>
+      <p class="warn" id="ignoredNote" hidden></p>
       <div class="row">
         <button id="saveJvm">Save</button>
-        <button id="resetJvm">Default</button>
+        <button id="resetJvm">Clear</button>
       </div>
+      <details id="strayBox" hidden>
+        <summary id="straySummary">Flags from your own game settings</summary>
+        <p class="muted small">Found in your own ProjectZomboid64.json (often added by PZO). Untick to leave one out of launcher launches; your own file isn't changed. If the game won't start after dropping one, tick it again.</p>
+        <div id="strayList"></div>
+        <div class="row"><button id="saveStray">Save</button></div>
+      </details>
       <label class="check"><input id="jfr" type="checkbox" /> Record a Java profile (JFR) when staff ask for one</label>
       <p class="muted small" id="jfrNote"></p>
       <label class="check"><input id="potato" type="checkbox" /> Potato Mode (for low-end PCs)</label>
@@ -61,6 +82,11 @@
       <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
       <details id="changes">
         <summary>What's new</summary>
+        <h3>0.1.8</h3>
+        <ul>
+          <li>JVM tuner: game memory and garbage collector (G1, or ZGC for trials) are now their own settings, with a warning when memory is set above what's safe for your PC.</li>
+          <li>Flags from your own ProjectZomboid64.json (often added by PZO) are listed once so you can keep or drop each for launcher launches.</li>
+        </ul>
         <h3>0.1.6</h3>
         <ul>
           <li>Diagnostics panel for when staff ask: native memory tracking, launch without PZO, PZO texture handoff off, PZO FSR off.</li>
@@ -101,6 +127,16 @@
       <p id="confirmText"></p>
       <div class="row">
         <button value="ok" class="primary">Uninstall</button>
+        <button value="cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="flagsDlg">
+    <form method="dialog">
+      <p>Your own ProjectZomboid64.json has flags the launcher doesn't know (often added by PZO). Keep them for launcher launches? Your own file isn't changed, and you can change this later under "Flags from your own game settings".</p>
+      <div id="flagsList"></div>
+      <div class="row">
+        <button value="ok" class="primary">Save and launch</button>
         <button value="cancel">Cancel</button>
       </div>
     </form>
