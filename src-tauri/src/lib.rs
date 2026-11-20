@@ -104,8 +104,10 @@ struct Status {
     launcher: &'static str,
     game_dir: Option<String>,
     components: Vec<Component>,
-    /// free-text extra flags
+    /// the whole launch line: guided set + extras (user 11-20: keep showing it in the JVM box)
     jvm_args: String,
+    /// guided set alone (the Default button)
+    guided: String,
     heap_gb: u64,
     /// the heap for this PC's RAM; the page warns above it (user 11-20: warn only)
     default_heap: u64,
@@ -156,7 +158,8 @@ async fn get_status() -> Status {
         launcher: env!("CARGO_PKG_VERSION"),
         game_dir: game.map(|g| g.display().to_string()),
         components: comps,
-        jvm_args: s.jvm_args.clone().unwrap_or_default(),
+        jvm_args: launch_args(&s),
+        guided: launch::guided_args(heap_of(&s), &gc_of(&s)),
         heap_gb: heap_of(&s),
         default_heap: launch::heap_for_ram(files::total_ram_gb()),
         gc: gc_of(&s),
@@ -194,11 +197,16 @@ async fn set_jvm_args(args: String) -> Result<String, String> {
     if t.split_whitespace().any(|a| !a.starts_with('-')) {
         return Err("Every JVM setting starts with '-'".into());
     }
-    s.jvm_args = if t.is_empty() { None } else { Some(t) };
+    // the box shows the whole launch line (user 11-20): heap/GC flags matching the choices above are fine, others are
+    // ignored (guided wins); everything else is kept as extras
+    let guided = launch::guided_args(heap_of(&s), &gc_of(&s));
+    let ign: Vec<&str> = t.split_whitespace()
+        .filter(|a| launch::guided_owned(a) && !guided.split_whitespace().any(|g| g == *a)).collect();
+    let extras: Vec<&str> = t.split_whitespace().filter(|a| !launch::guided_owned(a)).collect();
+    s.jvm_args = if extras.is_empty() { None } else { Some(extras.join(" ")) };
     save(&s)?;
-    let ign = ignored_extras(&s);
-    Ok(if ign.is_empty() { "Extra JVM flags saved".into() } else {
-        format!("Extra JVM flags saved; ignored because memory / garbage collector above decide them: {}", ign.join(" "))
+    Ok(if ign.is_empty() { "JVM flags saved".into() } else {
+        format!("JVM flags saved; ignored because game memory / garbage collector above decide them: {}", ign.join(" "))
     })
 }
 

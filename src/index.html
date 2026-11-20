@@ -44,13 +44,13 @@
           <option value="zgc">ZGC (trial, when staff ask)</option>
         </select>
       </div>
-      <label for="jvm">Extra JVM flags (optional)</label>
-      <textarea id="jvm" rows="2" spellcheck="false"></textarea>
-      <p class="muted small">Memory and garbage collector flags typed here are ignored: the choices above decide them.</p>
+      <label for="jvm">JVM settings</label>
+      <textarea id="jvm" rows="3" spellcheck="false"></textarea>
+      <p class="muted small">The line the next launch uses. Add extra flags here; memory and garbage collector come from the choices above, so changing them here is ignored.</p>
       <p class="warn" id="ignoredNote" hidden></p>
       <div class="row">
         <button id="saveJvm">Save</button>
-        <button id="resetJvm">Clear</button>
+        <button id="resetJvm">Default</button>
       </div>
       <details id="strayBox" hidden>
         <summary id="straySummary">Flags from your own game settings</summary>
@@ -82,6 +82,10 @@
       <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
       <details id="changes">
         <summary>What's new</summary>
+        <h3>0.1.9</h3>
+        <ul>
+          <li>The JVM settings box shows the full line the next launch uses again, and Default puts the standard line back.</li>
+        </ul>
         <h3>0.1.8</h3>
         <ul>
           <li>JVM tuner: game memory and garbage collector (G1, or ZGC for trials) are now their own settings, with a warning when memory is set above what's safe for your PC.</li>

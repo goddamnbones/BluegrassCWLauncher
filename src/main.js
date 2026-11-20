@@ -27,6 +27,7 @@ function ramChoice(heap) {
   return hit || "custom";
 }
 
+let guided = ""; // memory + GC line from the choices (Default button)
 let stray = []; // [flag, keep|null] from get_status
 let strayKey = "";
 
@@ -50,6 +51,7 @@ function flagChoices(box) {
 
 async function refresh() {
   const s = await invoke("get_status");
+  guided = s.guided;
   $("version").textContent = "launcher " + s.launcher;
   if (document.activeElement !== $("jvm")) $("jvm").value = s.jvm_args;
   if (document.activeElement !== $("game")) $("game").value = s.game_dir || "";
@@ -163,7 +165,7 @@ $("potato").addEventListener("change", () => run($("potato"), () => invoke("set_
 for (const k of DIAG) {
   $(k).addEventListener("change", () => run($(k), () => invoke("set_diag", { key: k, on: $(k).checked })));
 }
-$("resetJvm").addEventListener("click", () => { $("jvm").value = ""; });
+$("resetJvm").addEventListener("click", () => { $("jvm").value = guided; });
 $("saveGame").addEventListener("click", () => run($("saveGame"), () => invoke("set_game_dir", { dir: $("game").value })));
 
 $("update").addEventListener("click", () => run($("update"), () => invoke("apply_update")));
