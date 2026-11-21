@@ -113,16 +113,51 @@ pub fn heap_for_ram(ram: u64) -> u64 {
 /// JVM tuner (user 11-20, after Weber's out-of-memory crashes with 16/20 GB heaps on 32 GB RAM): heap and GC are
 /// guided choices. G1 = Debugging\clients.md "Advice given" 2026-11-14 (50 ms pause target); ZGC for trials (no pause
 /// target, ZGC ignores it). Both get the bigger code cache and metaspace.
-pub fn guided_args(heap: u64, gc: &str) -> String {
-    let gc_set = if gc == "zgc" { "-XX:+UseZGC" } else { "-XX:+UseG1GC -XX:MaxGCPauseMillis=50" };
-    format!("-Xms{heap}g -Xmx{heap}g {gc_set} -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m")
+/// 0.1.11 (user 11-21): Shenandoah classic + generational (Zulu 25 ships it) as equal choices; pause target, code
+/// cache and metaspace are Advanced fields (pause target G1 only).
+pub const GCS: [&str; 4] = ["g1", "zgc", "shen", "shen_gen"];
+
+pub struct Tune { pub pause_ms: u64, pub code_mb: u64, pub meta_mb: u64 }
+impl Default for Tune { fn default() -> Self { Tune { pause_ms: 50, code_mb: 512, meta_mb: 512 } } }
+
+pub fn gc_name(gc: &str) -> &'static str {
+    match gc { "zgc" => "ZGC", "shen" => "Shenandoah", "shen_gen" => "Shenandoah generational", _ => "G1" }
+}
+
+pub fn guided_args(heap: u64, gc: &str, t: &Tune) -> String {
+    let gc_set = match gc {
+        "zgc" => "-XX:+UseZGC".to_string(),
+        "shen" => "-XX:+UseShenandoahGC".to_string(),
+        "shen_gen" => "-XX:+UseShenandoahGC -XX:ShenandoahGCMode=generational".to_string(),
+        _ => format!("-XX:+UseG1GC -XX:MaxGCPauseMillis={}", t.pause_ms),
+    };
+    format!("-Xms{heap}g -Xmx{heap}g {gc_set} -XX:ReservedCodeCacheSize={}m -XX:MetaspaceSize={}m", t.code_mb, t.meta_mb)
 }
 
 /// Flags the guided choices own. Typed in the free-text field they're ignored: guided wins (user 11-20).
+/// Exact prefixes, so -XX:MaxMetaspaceSize etc. stay the player's (0.1.11).
 pub fn guided_owned(a: &str) -> bool {
     let a = a.trim();
     a.starts_with("-Xms") || a.starts_with("-Xmx") || (a.starts_with("-XX:") && a.ends_with("GC") && a.contains("Use"))
-        || ["MaxGCPauseMillis", "ReservedCodeCacheSize", "MetaspaceSize"].iter().any(|k| a.contains(k))
+        || ["-XX:MaxGCPauseMillis=", "-XX:ReservedCodeCacheSize=", "-XX:MetaspaceSize=", "-XX:ShenandoahGCMode="]
+            .iter().any(|k| a.starts_with(k))
+}
+
+/// Flag check (user 11-21): run the game's own Java with the line + -version. Ok(None) = accepted,
+/// Ok(Some(note)) = couldn't check (save anyway), Err = Java's own error text.
+pub fn check_flags(game: Option<&Path>, line: &str) -> Result<Option<String>, String> {
+    let Some(java) = game.map(|g| g.join("jre64").join("bin").join("java.exe")).filter(|j| j.is_file()) else {
+        return Ok(Some("flags not checked: the game's java.exe wasn't found".into()));
+    };
+    let mut c = Command::new(&java);
+    c.args(line.split_whitespace()).arg("-version");
+    #[cfg(windows)]
+    { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000); } // CREATE_NO_WINDOW
+    let out = match c.output() { Ok(o) => o, Err(e) => return Ok(Some(format!("flags not checked: {e}"))) };
+    if out.status.success() { return Ok(None); }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).take(4).collect();
+    Err(format!("Not saved: the game's Java refused the flags: {}", lines.join(" / ")))
 }
 
 // flags our set (or the launch) decides; dropped from the player's own vmArgs for this launch
@@ -260,20 +295,26 @@ mod tests {
         let stray: Vec<&str> = WEBER.split(' ').filter(|a| !replaced(a) && !needed(a)).collect();
         assert_eq!(stray, ["-XX:+PerfDisableSharedMem", "-XX:+UnlockExperimentalVMOptions", "-XX:+UseSuperWord",
             "-XX:MaxInlineLevel=15", "-XX:InlineSmallCode=2500", "-XX:+UseStringDeduplication",
-            "-XX:+IgnoreUnrecognizedVMOptions", "-Doshi.util.wmi.timeout=5000", "-XX:ShenandoahGCMode=generational"]);
+            "-XX:+IgnoreUnrecognizedVMOptions", "-Doshi.util.wmi.timeout=5000"]); // ShenandoahGCMode: the GC choice owns it (0.1.11)
     }
 
     #[test]
     fn guided_sets() {
-        assert_eq!(guided_args(10, "g1"), "-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
-        assert_eq!(guided_args(12, "zgc"), "-Xms12g -Xmx12g -XX:+UseZGC -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
-        assert!(guided_owned("-XX:+UseShenandoahGC") && !guided_owned("-XX:ShenandoahGCMode=generational"));
+        let d = Tune::default();
+        assert_eq!(guided_args(10, "g1", &d), "-Xms10g -Xmx10g -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
+        assert_eq!(guided_args(12, "zgc", &d), "-Xms12g -Xmx12g -XX:+UseZGC -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
+        assert_eq!(guided_args(12, "shen", &d), "-Xms12g -Xmx12g -XX:+UseShenandoahGC -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=512m");
+        let t = Tune { pause_ms: 100, code_mb: 256, meta_mb: 1024 };
+        assert_eq!(guided_args(8, "shen_gen", &t), "-Xms8g -Xmx8g -XX:+UseShenandoahGC -XX:ShenandoahGCMode=generational -XX:ReservedCodeCacheSize=256m -XX:MetaspaceSize=1024m");
+        assert!(guided_args(8, "g1", &t).contains("-XX:MaxGCPauseMillis=100"));
+        assert!(guided_owned("-XX:+UseShenandoahGC") && guided_owned("-XX:ShenandoahGCMode=generational"));
+        assert!(!guided_owned("-XX:MaxMetaspaceSize=1g"));
     }
 
     #[test]
     fn drop_leaves_flag_out() {
         let own = json!({ "vmArgs": ["-Dzomboid.steam=1", "-XX:+UseSuperWord", "-Xmx3072m"] });
-        let j = launch_json(&own, &guided_args(10, "g1"), &["-XX:+UseSuperWord".to_string()], false, false, false, false);
+        let j = launch_json(&own, &guided_args(10, "g1", &Tune::default()), &["-XX:+UseSuperWord".to_string()], false, false, false, false);
         let vm: Vec<&str> = j["vmArgs"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
         assert!(vm.contains(&"-Dzomboid.steam=1") && vm.contains(&"-Xmx10g"));
         assert!(!vm.contains(&"-XX:+UseSuperWord") && !vm.contains(&"-Xmx3072m"));

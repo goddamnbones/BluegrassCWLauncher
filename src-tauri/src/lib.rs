@@ -17,9 +17,21 @@ struct Settings {
     /// JVM tuner (user 11-20). None = the default for this PC's RAM (launch::heap_for_ram).
     #[serde(default)]
     heap_gb: Option<u64>,
-    /// "g1" (default) or "zgc".
+    /// launch::GCS: "g1" (default), "zgc", "shen", "shen_gen".
     #[serde(default)]
     gc: Option<String>,
+    /// Advanced (0.1.11): None = launch::Tune default
+    #[serde(default)]
+    pause_ms: Option<u64>,
+    #[serde(default)]
+    code_mb: Option<u64>,
+    #[serde(default)]
+    meta_mb: Option<u64>,
+    /// Manual override (0.1.11): the whole line as typed; guided choices off
+    #[serde(default)]
+    manual: bool,
+    #[serde(default)]
+    manual_line: Option<String>,
     /// Keep (true) / drop (false) per stray flag from the player's own json, asked once per flag.
     #[serde(default)]
     flags: BTreeMap<String, bool>,
@@ -76,11 +88,43 @@ fn ignored_extras(s: &Settings) -> Vec<String> {
     s.jvm_args.as_deref().unwrap_or("").split_whitespace().filter(|a| launch::guided_owned(a)).map(String::from).collect()
 }
 
-/// The JVM flags for a launch: guided set, then the extras minus anything the guided set owns.
-fn launch_args(s: &Settings) -> String {
-    let mut v = vec![launch::guided_args(heap_of(s), &gc_of(s))];
-    v.extend(s.jvm_args.as_deref().unwrap_or("").split_whitespace().filter(|a| !launch::guided_owned(a)).map(String::from));
+fn tune_of(s: &Settings) -> launch::Tune {
+    let d = launch::Tune::default();
+    launch::Tune { pause_ms: s.pause_ms.unwrap_or(d.pause_ms), code_mb: s.code_mb.unwrap_or(d.code_mb), meta_mb: s.meta_mb.unwrap_or(d.meta_mb) }
+}
+
+fn extras_of(s: &Settings) -> Vec<String> {
+    s.jvm_args.as_deref().unwrap_or("").split_whitespace().filter(|a| !launch::guided_owned(a)).map(String::from).collect()
+}
+
+/// Guided set, then the extras minus anything the guided set owns.
+fn guided_line(s: &Settings) -> String {
+    let mut v = vec![launch::guided_args(heap_of(s), &gc_of(s), &tune_of(s))];
+    v.extend(extras_of(s));
     v.join(" ")
+}
+
+/// The JVM flags for a launch: the manual line when the override is on, else the guided line.
+fn launch_args(s: &Settings) -> String {
+    match (&s.manual, &s.manual_line) {
+        (true, Some(l)) if !l.trim().is_empty() => l.clone(),
+        _ => guided_line(s),
+    }
+}
+
+/// -Xmx of the manual line (for the memory warning), else the guided heap.
+fn launch_heap(s: &Settings) -> u64 {
+    if s.manual {
+        if let Some(gb) = launch_args(s).split_whitespace().filter_map(|a| a.strip_prefix("-Xmx")).filter_map(heap_from).last() { return gb; }
+    }
+    heap_of(s)
+}
+
+/// The flag check runs the line the launch will use: kept flags from the player's own json first, then ours.
+fn check_line(s: &Settings, game: Option<&std::path::Path>, ours: &str) -> Result<Option<String>, String> {
+    let mut v: Vec<String> = game.map(launch::stray_flags).unwrap_or_default().into_iter().filter(|f| s.flags.get(f) != Some(&false)).collect();
+    v.push(ours.to_string());
+    launch::check_flags(game, &v.join(" "))
 }
 
 fn save(s: &Settings) -> Result<(), String> {
@@ -106,8 +150,17 @@ struct Status {
     components: Vec<Component>,
     /// the whole launch line: guided set + extras (user 11-20: keep showing it in the JVM box)
     jvm_args: String,
-    /// guided set alone (the Default button)
+    /// guided set + extras ("Start from guided line" in manual override)
     guided: String,
+    /// the extras box (guided mode) or the full typed line (manual)
+    box_text: String,
+    manual: bool,
+    pause_ms: u64,
+    code_mb: u64,
+    meta_mb: u64,
+    /// game memory setting (input box)
+    heap_set: u64,
+    /// heap the launch uses (manual: its -Xmx); the warning uses this
     heap_gb: u64,
     /// the heap for this PC's RAM; the page warns above it (user 11-20: warn only)
     default_heap: u64,
@@ -159,8 +212,14 @@ async fn get_status() -> Status {
         game_dir: game.map(|g| g.display().to_string()),
         components: comps,
         jvm_args: launch_args(&s),
-        guided: launch::guided_args(heap_of(&s), &gc_of(&s)),
-        heap_gb: heap_of(&s),
+        guided: guided_line(&s),
+        box_text: if s.manual { launch_args(&s) } else { extras_of(&s).join(" ") },
+        manual: s.manual,
+        pause_ms: tune_of(&s).pause_ms,
+        code_mb: tune_of(&s).code_mb,
+        meta_mb: tune_of(&s).meta_mb,
+        heap_set: heap_of(&s),
+        heap_gb: launch_heap(&s),
         default_heap: launch::heap_for_ram(files::total_ram_gb()),
         gc: gc_of(&s),
         ignored: ignored_extras(&s),
@@ -197,17 +256,57 @@ async fn set_jvm_args(args: String) -> Result<String, String> {
     if t.split_whitespace().any(|a| !a.starts_with('-')) {
         return Err("Every JVM setting starts with '-'".into());
     }
-    // the box shows the whole launch line (user 11-20): heap/GC flags matching the choices above are fine, others are
-    // ignored (guided wins); everything else is kept as extras
-    let guided = launch::guided_args(heap_of(&s), &gc_of(&s));
-    let ign: Vec<&str> = t.split_whitespace()
-        .filter(|a| launch::guided_owned(a) && !guided.split_whitespace().any(|g| g == *a)).collect();
-    let extras: Vec<&str> = t.split_whitespace().filter(|a| !launch::guided_owned(a)).collect();
-    s.jvm_args = if extras.is_empty() { None } else { Some(extras.join(" ")) };
+    let game = game_dir(&s);
+    // 0.1.11 (user 11-21): manual override saves the line as typed; otherwise the box holds extras only and flags the
+    // guided choices own are ignored (guided wins). Either way the game's Java checks the line first.
+    let mut ign: Vec<String> = Vec::new();
+    let full = if s.manual {
+        if t.is_empty() { return Err("Type the full JVM line, or turn manual override off".into()); }
+        t.clone()
+    } else {
+        ign = t.split_whitespace().filter(|a| launch::guided_owned(a)).map(String::from).collect();
+        let extras: Vec<&str> = t.split_whitespace().filter(|a| !launch::guided_owned(a)).collect();
+        let mut v = vec![launch::guided_args(heap_of(&s), &gc_of(&s), &tune_of(&s))];
+        v.extend(extras.iter().map(|e| e.to_string()));
+        v.join(" ")
+    };
+    let note = check_line(&s, game.as_deref(), &full)?;
+    if s.manual {
+        s.manual_line = Some(t);
+    } else {
+        let extras: Vec<&str> = t.split_whitespace().filter(|a| !launch::guided_owned(a)).collect();
+        s.jvm_args = if extras.is_empty() { None } else { Some(extras.join(" ")) };
+    }
     save(&s)?;
-    Ok(if ign.is_empty() { "JVM flags saved".into() } else {
-        format!("JVM flags saved; ignored because game memory / garbage collector above decide them: {}", ign.join(" "))
-    })
+    let mut msg = match note { None => "Flags checked with the game's Java: OK; JVM flags saved".to_string(), Some(n) => format!("JVM flags saved ({n})") };
+    if !ign.is_empty() {
+        msg += &format!("; ignored because the choices above decide them: {}", ign.join(" "));
+    }
+    Ok(msg)
+}
+
+#[tauri::command]
+async fn set_manual(on: bool) -> Result<String, String> {
+    let mut s = load();
+    s.manual = on;
+    if on && s.manual_line.as_deref().map(|l| l.trim().is_empty()).unwrap_or(true) { s.manual_line = Some(guided_line(&s)); }
+    save(&s)?;
+    Ok(if on { "Manual override on: the JVM line is used exactly as saved".into() } else { "Manual override off: memory and garbage collector choices are used again".into() })
+}
+
+/// Advanced fields (0.1.11). Defaults are stored as None so they follow future default changes.
+#[tauri::command]
+async fn set_tune(pause_ms: u64, code_mb: u64, meta_mb: u64) -> Result<String, String> {
+    if !(1..=1000).contains(&pause_ms) { return Err("G1 pause target must be 1 to 1000 ms".into()); }
+    if !(64..=2048).contains(&code_mb) { return Err("Code cache must be 64 to 2048 MB".into()); }
+    if !(64..=4096).contains(&meta_mb) { return Err("Metaspace must be 64 to 4096 MB".into()); }
+    let d = launch::Tune::default();
+    let mut s = load();
+    s.pause_ms = (pause_ms != d.pause_ms).then_some(pause_ms);
+    s.code_mb = (code_mb != d.code_mb).then_some(code_mb);
+    s.meta_mb = (meta_mb != d.meta_mb).then_some(meta_mb);
+    save(&s)?;
+    Ok(format!("Advanced: pause target {pause_ms} ms, code cache {code_mb} MB, metaspace {meta_mb} MB from the next launch"))
 }
 
 // JVM tuner (user 11-20): guided heap (warn above the RAM default, never block) and GC (G1 or ZGC).
@@ -227,11 +326,11 @@ async fn set_heap(gb: u64) -> Result<String, String> {
 
 #[tauri::command]
 async fn set_gc(gc: String) -> Result<String, String> {
-    if gc != "g1" && gc != "zgc" { return Err(format!("unknown garbage collector {gc}")); }
+    if !launch::GCS.contains(&gc.as_str()) { return Err(format!("unknown garbage collector {gc}")); }
     let mut s = load();
     s.gc = Some(gc.clone());
     save(&s)?;
-    Ok(format!("Garbage collector {} from the next launch", if gc == "zgc" { "ZGC" } else { "G1" }))
+    Ok(format!("Garbage collector {} from the next launch", launch::gc_name(&gc)))
 }
 
 /// Keep/drop answers for stray flags from the player's own json; remembered per flag (user 11-20).
@@ -364,7 +463,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_heap, set_gc, set_flags, set_jfr, set_diag, set_potato, install, uninstall, launch_game,
+        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_manual, set_tune, set_heap, set_gc, set_flags, set_jfr, set_diag, set_potato, install, uninstall, launch_game,
             check_update, apply_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -397,5 +496,21 @@ mod tests {
         let s = Settings { heap_gb: Some(10), gc: Some("g1".into()), jvm_args: Some("-Xmx20g -XX:+UseZGC -Dfoo=1".into()), ..Default::default() };
         assert_eq!(ignored_extras(&s), ["-Xmx20g", "-XX:+UseZGC"]);
         assert!(launch_args(&s).ends_with("-XX:MetaspaceSize=512m -Dfoo=1"));
+    }
+
+    #[test]
+    fn manual_override_used_as_typed() {
+        let mut s = Settings { heap_gb: Some(10), manual: true, manual_line: Some("-Xms20g -Xmx20g -XX:+UseShenandoahGC".into()), ..Default::default() };
+        assert_eq!(launch_args(&s), "-Xms20g -Xmx20g -XX:+UseShenandoahGC");
+        assert_eq!(launch_heap(&s), 20);
+        s.manual = false;
+        assert!(launch_args(&s).starts_with("-Xms10g -Xmx10g -XX:+UseG1GC"));
+        assert_eq!(launch_heap(&s), 10);
+    }
+
+    #[test]
+    fn advanced_values_in_guided_line() {
+        let s = Settings { heap_gb: Some(8), gc: Some("g1".into()), pause_ms: Some(80), meta_mb: Some(768), ..Default::default() };
+        assert_eq!(guided_line(&s), "-Xms8g -Xmx8g -XX:+UseG1GC -XX:MaxGCPauseMillis=80 -XX:ReservedCodeCacheSize=512m -XX:MetaspaceSize=768m");
     }
 }

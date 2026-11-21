@@ -42,15 +42,39 @@
         <select id="gc">
           <option value="g1">G1 (recommended)</option>
           <option value="zgc">ZGC (trial, when staff ask)</option>
+          <option value="shen">Shenandoah</option>
+          <option value="shen_gen">Shenandoah generational</option>
         </select>
       </div>
-      <label for="jvm">JVM settings</label>
+      <details id="adv" class="adv">
+        <summary>Advanced</summary>
+        <div class="in">
+          <div id="pauseBox">
+            <label for="pause">G1 pause target</label>
+            <div class="row"><input id="pause" type="number" min="1" max="1000" step="1" /><span class="unit">ms</span></div>
+          </div>
+          <label for="code">Code cache</label>
+          <div class="row"><input id="code" type="number" min="64" max="2048" step="64" /><span class="unit">MB</span></div>
+          <label for="meta">Metaspace</label>
+          <div class="row"><input id="meta" type="number" min="64" max="4096" step="64" /><span class="unit">MB</span></div>
+          <div class="row"><button id="saveTune">Set</button><button id="resetTune">Defaults</button></div>
+          <p class="muted small">Pause target shows for G1 only; ZGC and Shenandoah don't use it.</p>
+        </div>
+      </details>
+      <p class="muted small" id="manualNote" hidden>Choices above are off while manual override is on.</p>
+      <label class="check"><input id="manual" type="checkbox" /> I set the whole line myself (manual override)</label>
+      <label for="jvm" id="jvmLabel">Extra JVM flags <span class="unsaved" id="unsaved" hidden>● unsaved</span></label>
       <textarea id="jvm" rows="3" spellcheck="false"></textarea>
-      <p class="muted small">The line the next launch uses. Add extra flags here; memory and garbage collector come from the choices above, so changing them here is ignored.</p>
+      <p class="muted small" id="jvmHelp"></p>
       <p class="warn" id="ignoredNote" hidden></p>
       <div class="row">
         <button id="saveJvm">Save</button>
-        <button id="resetJvm">Default</button>
+        <button id="resetJvm">Clear</button>
+      </div>
+      <div id="previewBox">
+        <label for="preview">Launch line (read only)</label>
+        <textarea id="preview" rows="3" readonly spellcheck="false"></textarea>
+        <div class="row"><button id="copyLine">Copy</button></div>
       </div>
       <details id="strayBox" hidden>
         <summary id="straySummary">Flags from your own game settings</summary>
@@ -82,6 +106,14 @@
       <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
       <details id="changes">
         <summary>What's new</summary>
+        <h3>0.1.11</h3>
+        <ul>
+          <li>Shenandoah and Shenandoah generational garbage collectors.</li>
+          <li>Advanced: G1 pause target, code cache and metaspace are their own settings.</li>
+          <li>The JVM box holds only your extra flags and no longer resets on save or while you type; the full launch line is shown below it.</li>
+          <li>Flags are checked with the game's own Java before saving, so a typo can't break your launch.</li>
+          <li>Manual override: set the whole JVM line yourself.</li>
+        </ul>
         <h3>0.1.10</h3>
         <ul>
           <li>PZO now installs the latest release from GitHub; any installed PZO is used at launch.</li>

@@ -27,7 +27,14 @@ function ramChoice(heap) {
   return hit || "custom";
 }
 
-let guided = ""; // memory + GC line from the choices (Default button)
+let guided = ""; // guided line + extras ("Start from guided line" in manual override)
+let manual = false;
+let savedBox = ""; // box text as saved; the 5 s refresh leaves unsaved edits alone (0.1.11)
+const GUIDED_IDS = ["ram", "heap", "saveHeap", "gc", "adv"]; // greyed out while manual override is on
+const TUNE_DEFAULT = { pause: 50, code: 512, meta: 512 }; // launch.rs Tune::default; keep them matching
+
+function boxDirty() { return $("jvm").value.trim().replace(/\s+/g, " ") !== savedBox; }
+function showDirty() { $("unsaved").hidden = !boxDirty(); }
 let stray = []; // [flag, keep|null] from get_status
 let strayKey = "";
 
@@ -53,11 +60,29 @@ async function refresh() {
   const s = await invoke("get_status");
   guided = s.guided;
   $("version").textContent = "launcher " + s.launcher;
-  if (document.activeElement !== $("jvm")) $("jvm").value = s.jvm_args;
+  // the box is only rewritten when it has no unsaved edits or the mode changed (0.1.11)
+  if (!boxDirty() || manual !== s.manual) $("jvm").value = s.box_text;
+  savedBox = s.box_text;
+  manual = s.manual;
+  showDirty();
+  $("preview").value = s.jvm_args;
+  $("manual").checked = s.manual;
+  $("manualNote").hidden = !s.manual;
+  $("previewBox").hidden = s.manual;
+  for (const id of GUIDED_IDS) $(id).classList.toggle("off", s.manual);
+  $("jvmLabel").firstChild.textContent = s.manual ? "Full JVM line " : "Extra JVM flags ";
+  $("jvmHelp").textContent = s.manual
+    ? "Saved exactly as typed, after the game's Java checks it. ZombieBuddy, PZO, JFR and diagnostics flags are still added at launch, and your own game settings' flags are still asked keep/drop."
+    : "Only your extra flags. Memory, garbage collector and Advanced come from the choices above. Flags are checked with the game's own Java before saving.";
+  $("resetJvm").textContent = s.manual ? "Start from guided line" : "Clear";
   if (document.activeElement !== $("game")) $("game").value = s.game_dir || "";
-  if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.heap_gb);
-  if (document.activeElement !== $("heap")) $("heap").value = s.heap_gb;
+  if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.heap_set);
+  if (document.activeElement !== $("heap")) $("heap").value = s.heap_set;
   if (document.activeElement !== $("gc")) $("gc").value = s.gc;
+  for (const [id, v] of [["pause", s.pause_ms], ["code", s.code_mb], ["meta", s.meta_mb]]) {
+    if (document.activeElement !== $(id)) $(id).value = v;
+  }
+  $("pauseBox").hidden = s.gc !== "g1";
   $("ramNote").textContent = "This PC has " + s.ram_gb + " GB (Windows reports a little under the real size). Recommended game memory: " + s.default_heap + " GB.";
   $("heapWarn").hidden = !(s.heap_gb > s.default_heap);
   $("heapWarn").textContent = "Game memory " + s.heap_gb + " GB is above the " + s.default_heap + " GB recommended for this PC. Windows can run out of memory and the game can crash.";
@@ -147,7 +172,13 @@ $("launch").addEventListener("click", async () => {
   }
   run($("launch"), () => invoke("launch_game"));
 });
-$("saveJvm").addEventListener("click", () => run($("saveJvm"), () => invoke("set_jvm_args", { args: $("jvm").value })));
+// a successful save shows what was kept (ignored flags gone); a refused save leaves the typed text and the marker
+$("saveJvm").addEventListener("click", () => run($("saveJvm"), async () => {
+  const r = await invoke("set_jvm_args", { args: $("jvm").value });
+  $("jvm").value = "";
+  savedBox = "";
+  return r;
+}));
 $("ram").addEventListener("change", () => {
   const gb = RAM_HEAP[$("ram").value];
   if (!gb) return;
@@ -165,7 +196,20 @@ $("potato").addEventListener("change", () => run($("potato"), () => invoke("set_
 for (const k of DIAG) {
   $(k).addEventListener("change", () => run($(k), () => invoke("set_diag", { key: k, on: $(k).checked })));
 }
-$("resetJvm").addEventListener("click", () => { $("jvm").value = guided; });
+$("resetJvm").addEventListener("click", () => { $("jvm").value = manual ? guided : ""; showDirty(); });
+$("jvm").addEventListener("input", showDirty);
+$("manual").addEventListener("change", () => run($("manual"), () => invoke("set_manual", { on: $("manual").checked })));
+const tune = () => ({ pauseMs: Number($("pause").value), codeMb: Number($("code").value), metaMb: Number($("meta").value) });
+$("saveTune").addEventListener("click", () => run($("saveTune"), () => invoke("set_tune", tune())));
+$("resetTune").addEventListener("click", () => {
+  $("pause").value = TUNE_DEFAULT.pause; $("code").value = TUNE_DEFAULT.code; $("meta").value = TUNE_DEFAULT.meta;
+  run($("resetTune"), () => invoke("set_tune", tune()));
+});
+$("copyLine").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("preview").value); }
+  catch (_) { $("preview").select(); document.execCommand("copy"); }
+  log("Launch line copied");
+});
 $("saveGame").addEventListener("click", () => run($("saveGame"), () => invoke("set_game_dir", { dir: $("game").value })));
 
 $("update").addEventListener("click", () => run($("update"), () => invoke("apply_update")));
