@@ -56,8 +56,10 @@ function flagChoices(box) {
   return out;
 }
 
+let gameRunning = false; // last status: the poll slows down while the game runs
 async function refresh() {
   const s = await invoke("get_status");
+  gameRunning = s.running;
   guided = s.guided;
   $("version").textContent = "launcher " + s.launcher;
   // the box is only rewritten when it has no unsaved edits or the mode changed (0.1.11)
@@ -233,10 +235,10 @@ async function checkUpdate() {
 
 refresh().catch((e) => log(String(e), true));
 checkUpdate();
-let busy = false; // never stack status calls
-setInterval(async () => {
-  if (busy) return;
-  busy = true;
+// Status every 5 s, every 15 s while the game runs (each status scans files and the process list).
+// One timer at a time, rescheduled after each call, so calls never stack.
+async function poll() {
   try { await refresh(); } catch (_) {}
-  busy = false;
-}, 5000);
+  setTimeout(poll, gameRunning ? 15000 : 5000);
+}
+setTimeout(poll, 5000);

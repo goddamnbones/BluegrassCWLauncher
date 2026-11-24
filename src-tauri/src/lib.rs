@@ -186,6 +186,8 @@ async fn get_status() -> Status {
     let s = load();
     let game = game_dir(&s);
     let mut warnings = Vec::new();
+    // one process scan per status (the page polls)
+    let running = launch::game_running();
     let comps = [("zombiebuddy", "ZombieBuddy"), ("pzo", "PZO")]
         .iter()
         .map(|(id, name)| Component {
@@ -201,7 +203,7 @@ async fn get_status() -> Status {
             warnings.push(format!("Stray Java files in the game folder ({}) can break ZombieBuddy's networking. \
                 Steam > Verify files, or remove them.", stray.join(", ")));
         }
-        if !launch::game_running() {
+        if !running {
             if let Some(note) = launch::restore(g) { warnings.push(note); }
         }
     }
@@ -209,7 +211,7 @@ async fn get_status() -> Status {
         .into_iter().map(|f| { let k = s.flags.get(&f).copied(); (f, k) }).collect();
     Status {
         launcher: env!("CARGO_PKG_VERSION"),
-        game_dir: game.map(|g| g.display().to_string()),
+        game_dir: game.as_ref().map(|g| g.display().to_string()),
         components: comps,
         jvm_args: launch_args(&s),
         guided: guided_line(&s),
@@ -224,14 +226,14 @@ async fn get_status() -> Status {
         gc: gc_of(&s),
         ignored: ignored_extras(&s),
         stray,
-        running: launch::game_running(),
+        running,
         jfr: s.jfr,
         jfr_dir: launch::JFR_DIR.into(),
         nmt: s.nmt,
         no_pzo: s.no_pzo,
         no_handoff: s.no_handoff,
         no_fsr: s.no_fsr,
-        potato: potato_file().is_file(),
+        potato: potato_file(game.as_deref()).is_file(),
         ram_gb: files::total_ram_gb(),
         warnings,
     }
@@ -256,6 +258,7 @@ async fn set_jvm_args(args: String) -> Result<String, String> {
     if t.split_whitespace().any(|a| !a.starts_with('-')) {
         return Err("Every JVM setting starts with '-'".into());
     }
+    if let Some(p) = launch::arg_problem(&t) { return Err(p); }
     let game = game_dir(&s);
     // 0.1.11 (user 11-21): manual override saves the line as typed; otherwise the box holds extras only and flags the
     // guided choices own are ignored (guided wins). Either way the game's Java checks the line first.
@@ -358,8 +361,8 @@ async fn set_jfr(on: bool) -> Result<String, String> {
 
 // Potato Mode (user 11-18): a flag file BluegrassCore reads at join (Compat_UIPerf.lua): lower graphics settings on
 // Bluegrass only, the player's own come back when they leave. The file existing is the setting; nothing in settings.json.
-fn potato_file() -> PathBuf {
-    diag::zomboid_lua_dir().join("bluegrass_potato.txt")
+fn potato_file(game: Option<&std::path::Path>) -> PathBuf {
+    diag::zomboid_lua_dir(game).join("bluegrass_potato.txt")
 }
 
 // Diagnostics panel (user 11-19): staff ask a player to tick one when chasing a problem. The two PZO switches change
@@ -377,14 +380,14 @@ async fn set_diag(key: String, on: bool) -> Result<String, String> {
     save(&s)?;
     let mut msg = format!("{what}: {} from the next launch", if on { "on" } else { "off" });
     if (key == "no_handoff" || key == "no_fsr") && !launch::game_running() {
-        for n in diag::apply_pzo(s.no_handoff, s.no_fsr)? { msg += "; "; msg += &n; }
+        for n in diag::apply_pzo(game_dir(&s).as_deref(), s.no_handoff, s.no_fsr)? { msg += "; "; msg += &n; }
     }
     Ok(msg)
 }
 
 #[tauri::command]
 async fn set_potato(on: bool) -> Result<String, String> {
-    let f = potato_file();
+    let f = potato_file(game_dir(&load()).as_deref());
     if on {
         if let Some(dir) = f.parent() { fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?; }
         fs::write(&f, "on, written by the Bluegrass launcher\n").map_err(|e| format!("can't write {}: {e}", f.display()))?;
@@ -422,7 +425,7 @@ async fn launch_game() -> Result<String, String> {
     let s = load();
     let game = game_dir(&s).ok_or("Game folder not found; set it first")?;
     let args = launch_args(&s);
-    let notes = if launch::game_running() { Vec::new() } else { diag::apply_pzo(s.no_handoff, s.no_fsr)? };
+    let notes = if launch::game_running() { Vec::new() } else { diag::apply_pzo(Some(&game), s.no_handoff, s.no_fsr)? };
     // not-yet-answered stray flags are kept (the page asks before launching)
     let drop = launch::stray_flags(&game).into_iter().filter(|f| s.flags.get(f) == Some(&false)).collect();
     let o = launch::Opts { jfr: s.jfr, nmt: s.nmt, no_pzo: s.no_pzo, drop };

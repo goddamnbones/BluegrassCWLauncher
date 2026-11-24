@@ -1,20 +1,36 @@
 // Diagnostics switches that change PZO's own settings (user 11-19, item 283: black screen on quit + FSR coming back).
 // While a switch is ticked, every launch forces the PZO setting off; the value the player had is saved the first time
-// and put back when they untick. PZO keeps the settings in two files under %USERPROFILE%\Zomboid\Lua:
+// and put back when they untick. PZO keeps the settings in two files under <Zomboid folder>\Lua (zomboid_dir):
 //   pzo_config.json   one json object: "fsr_enabled", "texture_handoff" (PZOConfig)
 //   MPOptim_Settings.ini   KEY=VALUE lines; F10's FSR switch writes JVM_FSREnabled here as well as fsr_enabled
 use crate::files;
 use serde_json::{Value, json};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn zomboid_lua_dir() -> PathBuf {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join("Zomboid").join("Lua")
+/// The player's Zomboid folder: -cachedir= or -Duser.home= (+ Zomboid) from their ProjectZomboid64.json, else
+/// %USERPROFILE%\Zomboid. Our launch json keeps those args (launch.rs only replaces memory/GC/agent flags).
+pub fn zomboid_dir(game: Option<&Path>) -> PathBuf {
+    game.and_then(|g| fs::read(g.join(files::GAME_JSON)).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| zomboid_dir_from(&v))
+        .unwrap_or_else(|| PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Zomboid"))
 }
 
-fn config_json() -> PathBuf { zomboid_lua_dir().join("pzo_config.json") }
-fn settings_ini() -> PathBuf { zomboid_lua_dir().join("MPOptim_Settings.ini") }
+fn zomboid_dir_from(v: &Value) -> Option<PathBuf> {
+    let (mut cache, mut home) = (None, None);
+    for a in ["vmArgs", "args"].iter().flat_map(|k| v[*k].as_array().cloned().unwrap_or_default()) {
+        let Some(a) = a.as_str().map(str::trim) else { continue };
+        if let Some(x) = a.strip_prefix("-cachedir=") { cache = Some(PathBuf::from(x.trim_matches('"'))); }
+        if let Some(x) = a.strip_prefix("-Duser.home=") { home = Some(PathBuf::from(x.trim_matches('"')).join("Zomboid")); }
+    }
+    cache.filter(|p: &PathBuf| !p.as_os_str().is_empty()).or(home)
+}
+
+pub fn zomboid_lua_dir(game: Option<&Path>) -> PathBuf { zomboid_dir(game).join("Lua") }
+
+fn config_json(game: Option<&Path>) -> PathBuf { zomboid_lua_dir(game).join("pzo_config.json") }
+fn settings_ini(game: Option<&Path>) -> PathBuf { zomboid_lua_dir(game).join("MPOptim_Settings.ini") }
 /// The player's own values from before we forced them: {"json:<key>": value, "ini:<key>": "text"}
 fn saved_file() -> PathBuf { files::data_dir().join("pzo-forced.json") }
 
@@ -76,14 +92,14 @@ fn apply_one(saved: &mut Value, cfg: &mut Option<Value>, ini: &mut Option<String
 }
 
 /// Brings PZO's files in line with the two switches. Call only while the game is closed (PZO rewrites them in game).
-pub fn apply_pzo(no_handoff: bool, no_fsr: bool) -> Result<Vec<String>, String> {
+pub fn apply_pzo(game: Option<&Path>, no_handoff: bool, no_fsr: bool) -> Result<Vec<String>, String> {
     let mut saved = read_saved();
-    let cfg_text = fs::read_to_string(config_json()).ok();
+    let cfg_text = fs::read_to_string(config_json(game)).ok();
     let mut cfg: Option<Value> = match &cfg_text {
         Some(t) => Some(serde_json::from_str(t).map_err(|e| format!("PZO's pzo_config.json isn't valid json: {e}"))?),
         None => None,
     };
-    let ini_text = fs::read_to_string(settings_ini()).ok();
+    let ini_text = fs::read_to_string(settings_ini(game)).ok();
     let mut ini = ini_text.clone();
     let mut notes = Vec::new();
     apply_one(&mut saved, &mut cfg, &mut ini, "texture_handoff", None, no_handoff, &mut notes);
@@ -92,12 +108,12 @@ pub fn apply_pzo(no_handoff: bool, no_fsr: bool) -> Result<Vec<String>, String> 
     if let (Some(c), Some(old)) = (&cfg, &cfg_text) {
         let new = serde_json::to_string(c).map_err(|e| e.to_string())?; // PZO writes it compact, one line
         if &new != old {
-            fs::write(config_json(), new).map_err(|e| format!("can't write pzo_config.json: {e}"))?;
+            fs::write(config_json(game), new).map_err(|e| format!("can't write pzo_config.json: {e}"))?;
         }
     }
     if let (Some(n), Some(old)) = (&ini, &ini_text) {
         if n != old {
-            fs::write(settings_ini(), n).map_err(|e| format!("can't write MPOptim_Settings.ini: {e}"))?;
+            fs::write(settings_ini(game), n).map_err(|e| format!("can't write MPOptim_Settings.ini: {e}"))?;
         }
     }
     fs::write(saved_file(), serde_json::to_string_pretty(&saved).unwrap_or_default())
@@ -108,6 +124,13 @@ pub fn apply_pzo(no_handoff: bool, no_fsr: bool) -> Result<Vec<String>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zomboid_dir_from_json() {
+        assert_eq!(zomboid_dir_from(&json!({"vmArgs": ["-Xmx8g", "-Duser.home=D:/PZ"]})), Some(PathBuf::from("D:/PZ").join("Zomboid")));
+        assert_eq!(zomboid_dir_from(&json!({"vmArgs": ["-Duser.home=D:/PZ"], "args": ["-cachedir=E:/Z"]})), Some(PathBuf::from("E:/Z")));
+        assert_eq!(zomboid_dir_from(&json!({"vmArgs": ["-Xmx8g"]})), None);
+    }
 
     #[test]
     fn force_then_restore() {

@@ -44,6 +44,27 @@ fn is_ours(state: &Value, hash: &str) -> bool {
     state["ours"].as_array().map(|a| a.iter().any(|h| h.as_str() == Some(hash))).unwrap_or(false)
 }
 
+/// A json only our launch (or PZO during it) writes: PZO's entry point as main class, or the ZombieBuddy agent. Decided
+/// by content, so a lost or reset launch-state can't make us save one of these as the player's own json.
+fn looks_ours(b: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<Value>(b) else { return false };
+    v["mainClass"].as_str() == Some("com/pzoptimizer/PZOEntrypoint")
+        || v["vmArgs"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).any(|a| a.trim().starts_with("-agentlib:zbNative"))
+}
+
+/// Ours by recorded hash or by content.
+fn ours_json(b: &[u8]) -> bool { looks_ours(b) || is_ours(&read_state(), &files::sha256_bytes(b)) }
+
+const STAGED_JSON: &str = "ProjectZomboid64.json.new";
+
+/// JVM flags are split on spaces and written one per vmArgs entry, so a quote or a space inside one flag can't be
+/// carried (the game would get pieces). None = fine.
+pub fn arg_problem(line: &str) -> Option<String> {
+    line.split_whitespace().find(|a| a.contains('"') || a.contains('\'')).map(|a| format!(
+        "{a}: JVM flags can't contain quotes, and one flag can't hold a space (a space starts a new flag). \
+         Use a path without spaces"))
+}
+
 fn remember_ours(hash: String) {
     let mut st = read_state();
     let mut list = st["ours"].as_array().cloned().unwrap_or_default();
@@ -60,7 +81,6 @@ fn remember_ours(hash: String) {
 pub fn restore(game: &Path) -> Option<String> {
     let backup = fs::read(own_copy()).ok()?;
     let path = game.join(GAME_JSON);
-    let _ = fs::remove_file(game.join("ProjectZomboid64.json.new")); // PZO's staged update json
     let cur = fs::read(&path).ok()?;
     let h = files::sha256_bytes(&cur);
     if cur == backup || !is_ours(&read_state(), &h) {
@@ -184,7 +204,7 @@ fn needed(a: &str) -> bool {
 /// to the player's json, so those show up here too.
 pub fn stray_flags(game: &Path) -> Vec<String> {
     let Ok(cur) = fs::read(game.join(GAME_JSON)) else { return Vec::new() };
-    let own = if is_ours(&read_state(), &files::sha256_bytes(&cur)) { fs::read(own_copy()).unwrap_or_default() } else { cur };
+    let own = if ours_json(&cur) { fs::read(own_copy()).unwrap_or(cur) } else { cur };
     let Ok(v) = serde_json::from_slice::<Value>(&own) else { return Vec::new() };
     let mut out: Vec<String> = Vec::new();
     for a in v["vmArgs"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
@@ -230,14 +250,19 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
     let pzo_installed = files::component_state(game, "pzo") == "approved";
     let pzo = pzo_installed && !o.no_pzo;
     let path = game.join(GAME_JSON);
+    if let Some(p) = arg_problem(jvm_args) { return Err(p); }
     let cur = fs::read(&path).map_err(|e| format!("can't read {GAME_JSON}: {e}"))?;
-    let h = files::sha256_bytes(&cur);
-    // the folder holds the player's own json unless it's one of ours left from a launch that didn't get restored
-    if !is_ours(&read_state(), &h) {
+    // the folder holds the player's own json unless it's one of ours left from a launch that didn't get restored.
+    // One of ours never replaces the saved copy; with no saved copy yet, this launch is built from it unsaved.
+    let own_bytes = if ours_json(&cur) {
+        fs::read(own_copy()).unwrap_or(cur)
+    } else {
         fs::write(own_copy(), &cur).map_err(|e| format!("can't save your json: {e}"))?;
-    }
-    let own: Value = serde_json::from_slice(&fs::read(own_copy()).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("your {GAME_JSON} isn't valid json: {e}"))?;
+        cur
+    };
+    let own: Value = serde_json::from_slice(&own_bytes).map_err(|e| format!("your {GAME_JSON} isn't valid json: {e}"))?;
+    // PZO's staged update json from before this launch isn't ours to delete
+    let staged_before = fs::read(game.join(STAGED_JSON)).ok();
     let j = launch_json(&own, jvm_args, &o.drop, zb, pzo, jfr, o.nmt);
     let text = serde_json::to_string_pretty(&j).map_err(|e| e.to_string())?;
     remember_ours(files::sha256_bytes(text.as_bytes()));
@@ -255,6 +280,13 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
         }
     };
     let g = game.to_path_buf();
+    // PZO's staged update json (it moves it over the json shortly after exit): dropped only when this launch made it
+    let drop_staged = move |g: &Path| {
+        let p = g.join(STAGED_JSON);
+        if let Ok(b) = fs::read(&p) {
+            if staged_before.as_deref() != Some(&b[..]) { let _ = fs::remove_file(&p); }
+        }
+    };
     std::thread::spawn(move || {
         // record what PZO rewrites the json to during start-up, then put the player's own back
         for _ in 0..(RESTORE_AFTER_SECS / 2) {
@@ -266,13 +298,16 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
             }
             if let Ok(Some(_)) = child.try_wait() { break; }
         }
+        drop_staged(&g);
         restore(&g);
         let _ = child.wait();
         // PZO moves a staged update over the json shortly after exit; wait, then make sure the player's own is back
         std::thread::sleep(Duration::from_secs(20));
         if let Ok(b) = fs::read(g.join(GAME_JSON)) {
-            if fs::read(own_copy()).ok().as_deref() != Some(&b[..]) { remember_ours(files::sha256_bytes(&b)); }
+            // after exit only a json that is ours by content is recorded (the player may have changed theirs)
+            if looks_ours(&b) && fs::read(own_copy()).ok().as_deref() != Some(&b[..]) { remember_ours(files::sha256_bytes(&b)); }
         }
+        drop_staged(&g);
         restore(&g);
     });
     Ok(format!(
@@ -309,6 +344,23 @@ mod tests {
         assert!(guided_args(8, "g1", &t).contains("-XX:MaxGCPauseMillis=100"));
         assert!(guided_owned("-XX:+UseShenandoahGC") && guided_owned("-XX:ShenandoahGCMode=generational"));
         assert!(!guided_owned("-XX:MaxMetaspaceSize=1g"));
+    }
+
+    #[test]
+    fn ours_by_content() {
+        let own = json!({ "vmArgs": ["-Dzomboid.steam=1"], "mainClass": "zombie/gameStates/MainScreenState" });
+        let b = |v: &Value| serde_json::to_vec(v).unwrap();
+        assert!(!looks_ours(&b(&own)));
+        assert!(looks_ours(&b(&launch_json(&own, "-Xmx8g", &[], false, true, false, false)))); // PZO entry point
+        assert!(looks_ours(&b(&launch_json(&own, "-Xmx8g", &[], true, false, false, false)))); // zbNative
+        assert!(!looks_ours(b"not json"));
+    }
+
+    #[test]
+    fn refuses_quotes_in_args() {
+        assert!(arg_problem("-Xmx8g -XX:+UseG1GC").is_none());
+        assert!(arg_problem("-Dpath=\"C:\\My").is_some());
+        assert!(arg_problem("-Dx='a'").is_some());
     }
 
     #[test]

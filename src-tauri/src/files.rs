@@ -177,23 +177,54 @@ pub fn install(game: &Path, component: &str) -> Result<String, String> {
             .call()
             .map_err(|e| format!("download {} failed: {e}", p.file))?;
         let mut body = Vec::new();
+        // one byte over the limit, so a file that doesn't fit is an error, not a silently cut one
         resp.into_reader()
-            .take(64 * 1024 * 1024)
+            .take(MAX_DOWNLOAD + 1)
             .read_to_end(&mut body)
             .map_err(|e| format!("download {} failed: {e}", p.file))?;
+        if body.len() as u64 > MAX_DOWNLOAD {
+            return Err(format!("download {} failed: larger than {} MiB; nothing was installed", p.file, MAX_DOWNLOAD >> 20));
+        }
         let h = sha256_bytes(&body);
         if !latest && h != p.sha256 {
             return Err(format!("{} failed the hash check (got {h}); nothing was installed", p.file));
         }
         got.push((p, body));
     }
-    for (p, body) in got {
-        let dest = game.join(p.file);
-        let tmp = game.join(format!("{}.bgtmp", p.file));
-        fs::write(&tmp, &body).map_err(|e| format!("write {} failed: {e}", p.file))?;
-        fs::rename(&tmp, &dest).map_err(|e| format!("replace {} failed (is the game running?): {e}", p.file))?;
-    }
+    put_all(game, &got.iter().map(|(p, b)| (p.file, &b[..])).collect::<Vec<_>>())?;
     Ok(format!("{} {} installed", component, version))
+}
+
+const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
+
+/// Writes every file to a temp first; only when all are written are they moved in. If a move fails, the files
+/// already moved get their old content back (or are removed if they were new), so a component is never half-installed.
+fn put_all(game: &Path, items: &[(&str, &[u8])]) -> Result<(), String> {
+    let tmp = |f: &str| game.join(format!("{f}.bgtmp"));
+    let clean = || for (f, _) in items { let _ = fs::remove_file(tmp(f)); };
+    for (f, body) in items {
+        if let Err(e) = fs::write(tmp(f), body) {
+            clean();
+            return Err(format!("write {f} failed: {e}"));
+        }
+    }
+    let mut done: Vec<(&str, Option<Vec<u8>>)> = Vec::new();
+    for (f, _) in items {
+        let dest = game.join(f);
+        let old = fs::read(&dest).ok();
+        if let Err(e) = fs::rename(tmp(f), &dest) {
+            for (d, old) in &done {
+                match old {
+                    Some(b) => { let _ = fs::write(game.join(d), b); }
+                    None => { let _ = fs::remove_file(game.join(d)); }
+                }
+            }
+            clean();
+            return Err(format!("replace {f} failed (is the game running?): {e}; nothing was changed"));
+        }
+        done.push((f, old));
+    }
+    Ok(())
 }
 
 /// Deletes a component's files, only when every one is our approved version (a different version is not ours to remove).
@@ -229,5 +260,27 @@ pub fn total_ram_gb() -> u64 {
             return 16;
         }
         m.ullTotalPhys / (1024 * 1024 * 1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_all_rolls_back_the_first_file() {
+        let d = std::env::temp_dir().join(format!("bgl-putall-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("a.jar"), b"old a").unwrap();
+        // b.dll is a folder: the move over it fails
+        fs::create_dir_all(d.join("b.dll")).unwrap();
+        fs::write(d.join("b.dll").join("x"), b"x").unwrap();
+        assert!(put_all(&d, &[("a.jar", b"new a"), ("b.dll", b"new b")]).is_err());
+        assert_eq!(fs::read(d.join("a.jar")).unwrap(), b"old a");
+        assert!(!d.join("a.jar.bgtmp").exists() && !d.join("b.dll.bgtmp").exists());
+        assert!(put_all(&d, &[("a.jar", b"new a"), ("c.dll", b"new c")]).is_ok());
+        assert_eq!(fs::read(d.join("a.jar")).unwrap(), b"new a");
+        let _ = fs::remove_dir_all(&d);
     }
 }
