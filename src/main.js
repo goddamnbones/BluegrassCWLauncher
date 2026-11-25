@@ -80,7 +80,14 @@ async function refresh() {
   if (document.activeElement !== $("game")) $("game").value = s.game_dir || "";
   if (document.activeElement !== $("ram")) $("ram").value = ramChoice(s.heap_set);
   if (document.activeElement !== $("heap")) $("heap").value = s.heap_set;
+  // GC choices per runtime (0.1.13): options the selected Java lacks are hidden
+  for (const opt of $("gc").options) opt.hidden = !s.gcs.includes(opt.value);
   if (document.activeElement !== $("gc")) $("gc").value = s.gc;
+  if (document.activeElement !== $("runtime")) $("runtime").value = s.runtime;
+  $("runtimeNote").textContent = "GraalVM is optional and experimental; picking it downloads about " + s.graal_size_mb + " MB once"
+    + (s.graal_ready ? " (downloaded)." : ".");
+  $("graalFail").hidden = !s.graal_failed || s.running;
+  $("launchZulu").disabled = s.running || !s.game_dir;
   for (const [id, v] of [["pause", s.pause_ms], ["code", s.code_mb], ["meta", s.meta_mb]]) {
     if (document.activeElement !== $(id)) $(id).value = v;
   }
@@ -172,8 +179,31 @@ $("launch").addEventListener("click", async () => {
     log(String(e), true);
     return;
   }
-  run($("launch"), () => invoke("launch_game"));
+  run($("launch"), () => invoke("launch_game", { forceZulu: false }));
 });
+// one standard-Java launch after a failed GraalVM start; the saved runtime stays (user 11-25)
+$("launchZulu").addEventListener("click", async () => {
+  try {
+    if (!(await askNewFlags())) return;
+  } catch (e) {
+    log(String(e), true);
+    return;
+  }
+  run($("launchZulu"), () => invoke("launch_game", { forceZulu: true }));
+});
+$("runtime").addEventListener("change", () => run($("runtime"), () => invoke("set_runtime", { rt: $("runtime").value })));
+// GraalVM download progress (runtime.rs), polled once a second; cheap, no file or process scan
+async function pollRuntime() {
+  try {
+    const p = await invoke("runtime_progress");
+    const el = $("runtimeProgress");
+    el.hidden = !p.phase;
+    if (p.phase === "download") el.textContent = "Downloading GraalVM: " + Math.floor(p.done / 1e6) + " of " + Math.floor(p.total / 1e6) + " MB";
+    else if (p.phase === "extract") el.textContent = "Unpacking GraalVM...";
+  } catch (_) {}
+  setTimeout(pollRuntime, 1000);
+}
+pollRuntime();
 // a successful save shows what was kept (ignored flags gone); a refused save leaves the typed text and the marker
 $("saveJvm").addEventListener("click", () => run($("saveJvm"), async () => {
   const r = await invoke("set_jvm_args", { args: $("jvm").value });

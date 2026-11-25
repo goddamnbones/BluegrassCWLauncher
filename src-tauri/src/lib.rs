@@ -3,6 +3,7 @@
 mod diag;
 mod files;
 mod launch;
+mod runtime;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -46,6 +47,9 @@ struct Settings {
     no_handoff: bool,
     #[serde(default)]
     no_fsr: bool,
+    /// Java runtime (0.1.13, user 11-25): "zulu" (default, also missing/unknown) or "graalvm" (runtime.rs)
+    #[serde(default)]
+    runtime: Option<String>,
 }
 
 fn settings_path() -> PathBuf { files::data_dir().join("settings.json") }
@@ -81,7 +85,18 @@ fn heap_from(v: &str) -> Option<u64> {
 }
 
 fn heap_of(s: &Settings) -> u64 { s.heap_gb.unwrap_or_else(|| launch::heap_for_ram(files::total_ram_gb())) }
-fn gc_of(s: &Settings) -> String { s.gc.clone().unwrap_or_else(|| "g1".into()) }
+fn runtime_of(s: &Settings) -> &'static str { runtime::parse(s.runtime.as_deref()) }
+/// a saved GC the runtime doesn't support falls back to G1 (the setting itself stays)
+fn gc_of(s: &Settings) -> String { runtime::gc_for(runtime_of(s), s.gc.as_deref()) }
+
+/// java.exe of the selected runtime, for the flag check
+fn java_of(s: &Settings, game: Option<&std::path::Path>) -> Option<PathBuf> {
+    if runtime_of(s) == runtime::GRAALVM { return Some(runtime::java_exe(&runtime::graal_dir())); }
+    let g = game?;
+    // during a GraalVM session jre64 is the link; Zulu is in jre64_zulu
+    let zulu = g.join(runtime::JRE_ZULU);
+    Some(runtime::java_exe(&if zulu.is_dir() { zulu } else { g.join(runtime::JRE) }))
+}
 
 /// Flags typed in the free-text field that the guided heap/GC choices override.
 fn ignored_extras(s: &Settings) -> Vec<String> {
@@ -124,7 +139,7 @@ fn launch_heap(s: &Settings) -> u64 {
 fn check_line(s: &Settings, game: Option<&std::path::Path>, ours: &str) -> Result<Option<String>, String> {
     let mut v: Vec<String> = game.map(launch::stray_flags).unwrap_or_default().into_iter().filter(|f| s.flags.get(f) != Some(&false)).collect();
     v.push(ours.to_string());
-    launch::check_flags(game, &v.join(" "))
+    launch::check_flags(java_of(s, game), &v.join(" "))
 }
 
 fn save(s: &Settings) -> Result<(), String> {
@@ -165,6 +180,13 @@ struct Status {
     /// the heap for this PC's RAM; the page warns above it (user 11-20: warn only)
     default_heap: u64,
     gc: String,
+    /// GCs the selected runtime supports (the page hides the others)
+    gcs: Vec<&'static str>,
+    runtime: &'static str,
+    graal_ready: bool,
+    graal_size_mb: u64,
+    /// game gone 30 s after a GraalVM launch: the page offers "Launch on standard Java"
+    graal_failed: bool,
     /// extras the guided choices override (shown as ignored)
     ignored: Vec<String>,
     /// flags from the player's own json: (flag, Some(keep) or None = not asked yet)
@@ -205,6 +227,7 @@ async fn get_status() -> Status {
         }
         if !running {
             if let Some(note) = launch::restore(g) { warnings.push(note); }
+            if let Some(note) = launch::repair_jre(g) { warnings.push(note); }
         }
     }
     let stray = game.as_ref().map(|g| launch::stray_flags(g)).unwrap_or_default()
@@ -224,6 +247,11 @@ async fn get_status() -> Status {
         heap_gb: launch_heap(&s),
         default_heap: launch::heap_for_ram(files::total_ram_gb()),
         gc: gc_of(&s),
+        gcs: runtime::gcs(runtime_of(&s)).to_vec(),
+        runtime: runtime_of(&s),
+        graal_ready: runtime::graal_ready(),
+        graal_size_mb: runtime::GRAAL_BYTES / 1_000_000,
+        graal_failed: launch::GRAAL_FAILED.load(std::sync::atomic::Ordering::SeqCst),
         ignored: ignored_extras(&s),
         stray,
         running,
@@ -329,8 +357,8 @@ async fn set_heap(gb: u64) -> Result<String, String> {
 
 #[tauri::command]
 async fn set_gc(gc: String) -> Result<String, String> {
-    if !launch::GCS.contains(&gc.as_str()) { return Err(format!("unknown garbage collector {gc}")); }
     let mut s = load();
+    if !runtime::gcs(runtime_of(&s)).contains(&gc.as_str()) { return Err(format!("garbage collector {gc} isn't available on this Java")); }
     s.gc = Some(gc.clone());
     save(&s)?;
     Ok(format!("Garbage collector {} from the next launch", launch::gc_name(&gc)))
@@ -420,15 +448,34 @@ async fn uninstall(component: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Java runtime (0.1.13, user 11-25). Picking GraalVM downloads it at once (progress: runtime_progress).
 #[tauri::command]
-async fn launch_game() -> Result<String, String> {
+async fn set_runtime(rt: String) -> Result<String, String> {
+    let mut s = load();
+    let rt = runtime::parse(Some(&rt));
+    s.runtime = Some(rt.to_string());
+    save(&s)?;
+    if rt == runtime::ZULU { return Ok("Java: standard from the next launch".into()); }
+    tauri::async_runtime::spawn_blocking(runtime::ensure_graal).await.map_err(|e| e.to_string())??;
+    Ok(format!("Java: {} from the next launch", runtime::label(rt)))
+}
+
+#[tauri::command]
+async fn runtime_progress() -> runtime::Progress { runtime::progress() }
+
+/// `force_zulu`: the one-click "Launch on standard Java" after a failed GraalVM start; the saved runtime stays.
+#[tauri::command]
+async fn launch_game(force_zulu: Option<bool>) -> Result<String, String> {
     let s = load();
     let game = game_dir(&s).ok_or("Game folder not found; set it first")?;
     let args = launch_args(&s);
+    let java_home = if runtime_of(&s) == runtime::GRAALVM && force_zulu != Some(true) {
+        Some(tauri::async_runtime::spawn_blocking(runtime::ensure_graal).await.map_err(|e| e.to_string())??)
+    } else { None };
     let notes = if launch::game_running() { Vec::new() } else { diag::apply_pzo(Some(&game), s.no_handoff, s.no_fsr)? };
     // not-yet-answered stray flags are kept (the page asks before launching)
     let drop = launch::stray_flags(&game).into_iter().filter(|f| s.flags.get(f) == Some(&false)).collect();
-    let o = launch::Opts { jfr: s.jfr, nmt: s.nmt, no_pzo: s.no_pzo, drop };
+    let o = launch::Opts { jfr: s.jfr, nmt: s.nmt, no_pzo: s.no_pzo, drop, java_home };
     let mut msg = launch::launch(&game, &args, &o)?;
     if s.no_handoff { msg += ", PZO texture handoff off"; }
     if s.no_fsr { msg += ", PZO FSR off"; }
@@ -466,7 +513,7 @@ async fn apply_update(app: tauri::AppHandle) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_manual, set_tune, set_heap, set_gc, set_flags, set_jfr, set_diag, set_potato, install, uninstall, launch_game,
+        .invoke_handler(tauri::generate_handler![get_status, set_game_dir, set_jvm_args, set_manual, set_tune, set_heap, set_gc, set_flags, set_jfr, set_diag, set_potato, set_runtime, runtime_progress, install, uninstall, launch_game,
             check_update, apply_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -509,6 +556,15 @@ mod tests {
         s.manual = false;
         assert!(launch_args(&s).starts_with("-Xms10g -Xmx10g -XX:+UseG1GC"));
         assert_eq!(launch_heap(&s), 10);
+    }
+
+    #[test]
+    fn runtime_setting_defaults() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(runtime_of(&s), runtime::ZULU);
+        let s = Settings { runtime: Some("graalvm".into()), gc: Some("nope".into()), ..Default::default() };
+        assert_eq!(runtime_of(&s), runtime::GRAALVM);
+        assert_eq!(gc_of(&s), "g1");
     }
 
     #[test]

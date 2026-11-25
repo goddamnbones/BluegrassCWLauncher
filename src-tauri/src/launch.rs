@@ -2,10 +2,12 @@
 // PZO's entry point); afterwards the player's own json goes back, so a Steam launch is whatever it was before.
 // PZO's entry point rewrites the json early in every launch, so we restore 120 s after start and again after exit.
 use crate::files::{self, GAME_EXE, GAME_JSON};
+use crate::runtime;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const RESTORE_AFTER_SECS: u64 = 120;
@@ -25,6 +27,32 @@ pub struct Opts {
     pub no_pzo: bool,
     /// Flags from the player's own json they chose to drop (JVM tuner, user 11-20); left out of our launch only.
     pub drop: Vec<String>,
+    /// GraalVM home when this launch runs on GraalVM (jre64 swapped for the session, runtime.rs); None = standard
+    pub java_home: Option<PathBuf>,
+}
+
+/// A GraalVM session is being watched in this launcher; the status repair leaves jre64 alone meanwhile.
+static SWAP_WATCH: AtomicUsize = AtomicUsize::new(0);
+/// The game wasn't running 30 s after a GraalVM launch (user 11-25): the page offers one standard-Java launch.
+pub static GRAAL_FAILED: AtomicBool = AtomicBool::new(false);
+const GRAAL_CHECK_SECS: u64 = 30;
+
+fn set_swap_flag(on: bool) {
+    let mut st = read_state();
+    st["jre_swap"] = Value::Bool(on);
+    write_state(&st);
+}
+
+/// Puts Zulu back if a GraalVM session left jre64 swapped (crash, launcher closed). Only while the game is closed and
+/// no session of this launcher is watching it. Returns a note for the page, if any.
+pub fn repair_jre(game: &Path) -> Option<String> {
+    if SWAP_WATCH.load(Ordering::SeqCst) > 0 || !game.join(runtime::JRE_ZULU).exists() || game_running() { return None; }
+    match runtime::restore(game, &runtime::runtimes_root()) {
+        Ok(runtime::Restore::Restored) => { set_swap_flag(false); Some("Standard Java is back in the game folder (Steam launches as before)".into()) }
+        Ok(runtime::Restore::Nothing) => None,
+        Ok(runtime::Restore::Refused(n)) => Some(n),
+        Err(e) => Some(format!("Couldn't put standard Java back yet ({e}); retrying")),
+    }
 }
 
 fn own_copy() -> PathBuf { files::data_dir().join("player-json-backup.json") }
@@ -163,11 +191,11 @@ pub fn guided_owned(a: &str) -> bool {
             .iter().any(|k| a.starts_with(k))
 }
 
-/// Flag check (user 11-21): run the game's own Java with the line + -version. Ok(None) = accepted,
+/// Flag check (user 11-21): run the selected runtime's java.exe (0.1.13) with the line + -version. Ok(None) = accepted,
 /// Ok(Some(note)) = couldn't check (save anyway), Err = Java's own error text.
-pub fn check_flags(game: Option<&Path>, line: &str) -> Result<Option<String>, String> {
-    let Some(java) = game.map(|g| g.join("jre64").join("bin").join("java.exe")).filter(|j| j.is_file()) else {
-        return Ok(Some("flags not checked: the game's java.exe wasn't found".into()));
+pub fn check_flags(java: Option<PathBuf>, line: &str) -> Result<Option<String>, String> {
+    let Some(java) = java.filter(|j| j.is_file()) else {
+        return Ok(Some("flags not checked: the selected Java's java.exe wasn't found".into()));
     };
     let mut c = Command::new(&java);
     c.args(line.split_whitespace()).arg("-version");
@@ -177,7 +205,7 @@ pub fn check_flags(game: Option<&Path>, line: &str) -> Result<Option<String>, St
     if out.status.success() { return Ok(None); }
     let err = String::from_utf8_lossy(&out.stderr);
     let lines: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).take(4).collect();
-    Err(format!("Not saved: the game's Java refused the flags: {}", lines.join(" / ")))
+    Err(format!("Not saved: the selected Java refused the flags: {}", lines.join(" / ")))
 }
 
 // flags our set (or the launch) decides; dropped from the player's own vmArgs for this launch
@@ -242,6 +270,15 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
     if game_running() {
         return Err("Project Zomboid is already running".into());
     }
+    // a swap left from an earlier session goes back first, so a standard launch never runs on GraalVM
+    if game.join(runtime::JRE_ZULU).exists() {
+        match runtime::restore(game, &runtime::runtimes_root()) {
+            Ok(runtime::Restore::Restored) | Ok(runtime::Restore::Nothing) => set_swap_flag(false),
+            Ok(runtime::Restore::Refused(n)) => return Err(n),
+            Err(e) => return Err(format!("standard Java isn't back from the last GraalVM session yet: {e}")),
+        }
+    }
+    GRAAL_FAILED.store(false, Ordering::SeqCst);
     // JFR doesn't create missing folders: no folder, no recording
     if jfr {
         fs::create_dir_all(JFR_DIR).map_err(|e| format!("can't create {JFR_DIR} for the JFR recording: {e}"))?;
@@ -271,14 +308,54 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
     st["pending"] = Value::Bool(true);
     write_state(&st);
 
+    // GraalVM (user 11-25): recorded before the rename, so a crash at any point is repaired at the next start
+    let graal = o.java_home.is_some();
+    if let Some(home) = &o.java_home {
+        set_swap_flag(true);
+        if let Err(e) = runtime::swap(game, home) {
+            if !game.join(runtime::JRE_ZULU).exists() { set_swap_flag(false); }
+            restore(game);
+            return Err(e);
+        }
+        SWAP_WATCH.fetch_add(1, Ordering::SeqCst);
+    }
+    let unswap = move |g: &Path| {
+        if !graal { return; }
+        // "exited" = no game process on 3 checks in a row (Steam can relaunch the exe); retry while files are locked
+        let mut quiet = 0;
+        loop {
+            if game_running() { quiet = 0; } else { quiet += 1; }
+            if quiet >= 3 {
+                match runtime::restore(g, &runtime::runtimes_root()) {
+                    Ok(runtime::Restore::Refused(_)) => break, // the page shows the note (repair_jre)
+                    Ok(_) => { set_swap_flag(false); break; }
+                    Err(_) => {}
+                }
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        SWAP_WATCH.fetch_sub(1, Ordering::SeqCst);
+    };
+
     let child = Command::new(game.join(GAME_EXE)).current_dir(game).spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
             restore(game);
+            if graal {
+                let r = runtime::restore(game, &runtime::runtimes_root());
+                if matches!(r, Ok(runtime::Restore::Restored)) { set_swap_flag(false); }
+                SWAP_WATCH.fetch_sub(1, Ordering::SeqCst);
+            }
             return Err(format!("couldn't start the game: {e}"));
         }
     };
+    if graal {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(GRAAL_CHECK_SECS));
+            if !game_running() { GRAAL_FAILED.store(true, Ordering::SeqCst); }
+        });
+    }
     let g = game.to_path_buf();
     // PZO's staged update json (it moves it over the json shortly after exit): dropped only when this launch made it
     let drop_staged = move |g: &Path| {
@@ -309,9 +386,11 @@ pub fn launch(game: &Path, jvm_args: &str, o: &Opts) -> Result<String, String> {
         }
         drop_staged(&g);
         restore(&g);
+        unswap(&g);
     });
     Ok(format!(
-        "Started: ZombieBuddy {}, PZO {}{}",
+        "Started: Java: {}, ZombieBuddy {}, PZO {}{}",
+        runtime::label(if graal { runtime::GRAALVM } else { runtime::ZULU }),
         if zb { "on" } else { "off (not installed)" },
         if pzo { "on" } else if pzo_installed { "off (Diagnostics)" } else { "off (not installed)" },
         (if jfr { format!(", JFR recording to {JFR_DIR} (quit through the game menu)") } else { String::new() })

@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "bluegrasslauncher"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -185,6 +185,7 @@ dependencies = [
  "ureq",
  "windows-sys 0.59.0",
  "winreg 0.55.0",
+ "zip",
 ]
 
 [[package]]
@@ -5146,6 +5147,7 @@ checksum = "08687262e7c0f1284b259686f322805a8adaa8ef4d7210e76448950b3f083bf7"
 dependencies = [
  "constant_time_eq",
  "crc32fast",
+ "flate2",
  "getrandom 0.4.3",
  "indexmap 2.14.2",
  "libc",

@@ -19,6 +19,19 @@
       <button id="launch" class="primary">Launch Project Zomboid</button>
       <p class="muted small">Starts the game with ZombieBuddy and PZO for this launch only. Starting from Steam stays as it was.</p>
       <div id="warnings"></div>
+      <div id="graalFail" class="warn" hidden>
+        The game closed within 30 s of starting on GraalVM.
+        <div class="row"><button id="launchZulu">Launch on standard Java</button></div>
+      </div>
+      <label for="runtime">Java runtime</label>
+      <div class="row">
+        <select id="runtime">
+          <option value="zulu">Standard Java (recommended)</option>
+          <option value="graalvm">GraalVM CE 25</option>
+        </select>
+      </div>
+      <p class="muted small" id="runtimeNote">GraalVM is optional and experimental; picking it downloads about 316 MB once.</p>
+      <p class="muted small" id="runtimeProgress" hidden></p>
       <label for="ram">System RAM (sets the game's memory)</label>
       <div class="row">
         <select id="ram">
@@ -106,6 +119,19 @@
       <!-- Change summary per version; newest first. Same text as the GitHub release notes / latest.json "notes". -->
       <details id="changes">
         <summary>What's new</summary>
+        <h3>0.1.13</h3>
+        <ul>
+          <li>Java runtime choice: standard Java, or GraalVM CE 25 (optional, experimental, about 316 MB download). Steam launches always stay on standard Java.</li>
+        </ul>
+        <h3>0.1.12</h3>
+        <ul>
+          <li>Your own ProjectZomboid64.json is kept safe: Steam launches use it unchanged.</li>
+          <li>PZO's staged update file is only removed after the launcher's own launch.</li>
+          <li>Install fixes: download size limits, and two-file components install together or not at all.</li>
+          <li>The Zomboid folder is found from -cachedir when you've moved it.</li>
+          <li>JVM flags with quotes are refused instead of breaking the launch.</li>
+          <li>The launcher checks the game less often while you play.</li>
+        </ul>
         <h3>0.1.11</h3>
         <ul>
           <li>Shenandoah and Shenandoah generational garbage collectors.</li>
